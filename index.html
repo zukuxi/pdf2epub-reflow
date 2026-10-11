@@ -24,46 +24,31 @@ progress{width:100%}
 </head>
 <body>
 <h1>PDF 批量转 EPUB</h1>
-<p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件只在浏览器本地处理。</p>
+<p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
-  <h2>1. 选择 PDF</h2>
-  <input id="files" type="file" accept=".pdf,application/pdf" multiple>
-  <div id="fileList">尚未选择文件</div>
-  <p class="muted">可以使用上移、下移调整文件顺序。扫描图片型 PDF 不支持 OCR。</p>
+<h2>1. 选择 PDF</h2>
+<input id="files" type="file" accept=".pdf,application/pdf" multiple>
+<div id="fileList">尚未选择文件</div>
+<p class="muted">可以调整文件顺序。扫描图片型 PDF 不支持 OCR。</p>
 </section>
 
 <section>
-  <h2>2. 书籍设置</h2>
-  <label>书名
-    <input id="title" type="text" placeholder="输入书名">
-  </label>
-  <label>作者
-    <input id="author" type="text" placeholder="未知作者">
-  </label>
-  <label>
-    <input id="keepFiles" type="checkbox" checked>
-    每份 PDF 保留独立章节
-  </label>
-  <label>
-    <input id="detect" type="checkbox" checked>
-    自动识别章节标题并生成目录
-  </label>
-  <label>
-    <input id="clean" type="checkbox" checked>
-    清理中文多余空格、强制换行和常见英文断词
-  </label>
-  <button id="start" class="primary" disabled>开始转换并下载 EPUB</button>
+<h2>2. 书籍设置</h2>
+<label>书名<input id="title" type="text" placeholder="输入书名"></label>
+<label>作者<input id="author" type="text" placeholder="未知作者"></label>
+<label><input id="keepFiles" type="checkbox" checked> 每份 PDF 保留独立章节</label>
+<label><input id="detect" type="checkbox" checked> 自动识别章节标题并生成目录</label>
+<label><input id="clean" type="checkbox" checked> 清理中文多余空格和英文断词</label>
+<button id="start" class="primary" disabled>开始转换并下载 EPUB</button>
 </section>
 
 <section>
-  <h2>3. 转换进度</h2>
-  <progress id="progress" value="0" max="100"></progress>
-  <p id="status">等待选择文件</p>
-  <pre id="log">转换结果会显示在这里。</pre>
+<h2>3. 转换进度</h2>
+<progress id="progress" value="0" max="100"></progress>
+<p id="status">等待选择文件</p>
+<pre id="log">转换结果会显示在这里。</pre>
 </section>
-
-<p class="muted">首次打开需要联网加载 PDF.js 和 JSZip。PDF 图片、原始版式及复杂排版不会保留。</p>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -91,6 +76,14 @@ function progress(value) {
   $("progress").value = value;
 }
 
+function escapeHTML(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function renderFiles() {
   const box = $("fileList");
   box.replaceChildren();
@@ -116,8 +109,8 @@ function renderFiles() {
       ["删除", 0]
     ]) {
       const button = document.createElement("button");
-      button.textContent = label;
       button.type = "button";
+      button.textContent = label;
       button.disabled =
         (delta === -1 && i === 0) ||
         (delta === 1 && i === files.length - 1);
@@ -151,25 +144,14 @@ $("files").addEventListener("change", event => {
   say(files.length ? "文件已载入，可以开始转换。" : "请选择 PDF。");
 });
 
-function escapeHTML(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-const CJK = /[\u3400-\u9fff\uf900-\ufaff]/;
-const CJK_SPACE_LEFT = /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g;
-const CJK_PUNCT_SPACE = /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g;
-
 function isCJKChar(c) {
-  return CJK.test(c || "");
+  return /[\u3400-\u9fff\uf900-\ufaff]/.test(c || "");
 }
 
 /*
- * 清理提取文字。
- * 空行暂时保留；同一段内部的强制换行会在 EPUB 输出时处理。
+ * 清理提取文本。
+ * 保留由坐标分析得到的空行。
+ * 同一段内部的强制换行会在正文生成阶段连接。
  */
 function cleanText(s) {
   if (!s) return "";
@@ -198,36 +180,33 @@ function cleanText(s) {
 
   if (current.length) blocks.push(current);
 
-  function joinParagraph(block) {
+  return blocks.map(block => {
     let result = block.join(" ");
 
     if ($("clean").checked) {
-      result = result.replace(CJK_SPACE_LEFT, "$1");
-      result = result.replace(CJK_PUNCT_SPACE, "$1$2");
-
+      // 中文字符之间的多余空格
       result = result.replace(
-        /([（【「『〔〈])[ \t]+/g, "$1"
-      );
-      result = result.replace(
-        /[ \t]+([）】」』〕〉])/g, "$1"
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+        "$1"
       );
 
-      result = result.replace(/[ \t]{2,}/g, " ");
+      // 中文与标点之间的多余空格
+      result = result.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
+        "$1$2"
+      );
+
+      result = result.replace(/([（【「『〔〈])[ \t]+/g, "$1");
+      result = result.replace(/[ \t]+([）】」』〕〉])/g, "$1");
     }
 
     return result.trim();
-  }
-
-  return blocks
-    .map(joinParagraph)
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+  }).filter(Boolean).join("\n\n").trim();
 }
 
 /*
- * 根据 PDF 文字坐标重建行。
- * 利用行距估计原始段落边界。
+ * 根据 PDF.js 的文字坐标重建行。
+ * 相邻行距离明显增大时，标记为段落边界。
  */
 function extractLines(items) {
   const raw = [];
@@ -291,11 +270,9 @@ function extractLines(items) {
       if (!text) continue;
 
       if (previous) {
-        const prevText = previous.text;
-        const prevChar = prevText.slice(-1);
+        const prevChar = previous.text.slice(-1);
         const nextChar = text[0];
-        const prevEnd = previous.x + previous.width;
-        const gap = item.x - prevEnd;
+        const gap = item.x - (previous.x + previous.width);
 
         const prevLatin = /[A-Za-z0-9]$/.test(prevChar);
         const nextLatin = /^[A-Za-z0-9]/.test(nextChar);
@@ -303,24 +280,16 @@ function extractLines(items) {
         const nextCJK = isCJKChar(nextChar);
 
         if (
-          prevLatin &&
-          nextLatin &&
-          !prevCJK &&
-          !nextCJK &&
+          prevLatin && nextLatin &&
+          !prevCJK && !nextCJK &&
           gap > Math.max(1.2, item.height * 0.12) &&
           !/\s$/.test(result)
-        ) {
-          result += " ";
-        } else if (
-          !prevCJK &&
-          !nextCJK &&
-          !/\s$/.test(prevText) &&
-          /^\s/.test(text)
         ) {
           result += " ";
         }
       }
 
+      // 直接追加完整文字项目，不能裁掉引号或其他字符
       result += text;
       previous = item;
     }
@@ -344,15 +313,11 @@ function extractLines(items) {
 
   gaps.sort((a, b) => a - b);
 
-  let typicalGap = 0;
+  let typicalGap = gaps.length
+    ? gaps[Math.floor((gaps.length - 1) * 0.35)]
+    : 0;
 
-  if (gaps.length) {
-    typicalGap = gaps[Math.floor((gaps.length - 1) * 0.35)];
-  }
-
-  if (!typicalGap) {
-    typicalGap = nonEmpty[0].height * 1.2 || 12;
-  }
+  if (!typicalGap) typicalGap = nonEmpty[0].height * 1.2 || 12;
 
   const output = [];
 
@@ -362,7 +327,6 @@ function extractLines(items) {
     if (i > 0) {
       const previous = nonEmpty[i - 1];
       const gap = Math.abs(previous.y - line.y);
-
       const threshold = Math.max(
         typicalGap * 1.55,
         (previous.height + line.height) * 0.95
@@ -426,7 +390,6 @@ function splitHeadings(text, fallbackTitle) {
 
     if (isHeading && buffer.join("\n").trim().length > 80) {
       const body = buffer.join("\n").trim();
-
       if (body) chapters.push({ title, text: body });
 
       title = t;
@@ -478,12 +441,12 @@ function makeChapters(documents) {
 }
 
 /*
- * 新版正文排版：
- * 1. 先将 PDF 强制换行连接起来。
- * 2. 不在逗号、顿号、分号、冒号处换行。
- * 3. 在句号、问号、感叹号后另起段落。
- * 4. 句末引号会跟随句子，不会单独掉到下一段。
- * 5. 中文字符之间的多余空格会清理。
+ * 正文处理规则：
+ * 1. PDF 产生的强制换行先连接。
+ * 2. 逗号、分号、顿号不触发分段。
+ * 3. 句号、问号、感叹号后分段。
+ * 4. 左右引号都保留。
+ * 5. 使用逐字符扫描，不丢弃未匹配的文本。
  */
 function paragraphs(text) {
   let joined = String(text || "")
@@ -504,32 +467,41 @@ function paragraphs(text) {
       "$1$2"
     );
 
-    joined = joined.replace(
-      /([（【「『〔〈])[ \t]+/g, "$1"
-    );
-
-    joined = joined.replace(
-      /[ \t]+([）】」』〕〉])/g, "$1"
-    );
+    joined = joined.replace(/([（【「『〔〈])[ \t]+/g, "$1");
+    joined = joined.replace(/[ \t]+([）】」』〕〉])/g, "$1");
   }
 
-  /*
-   * 每个句末标点后分段。
-   * 保留中文/英文引号，避免引号被拆到下一段。
-   * 逗号、顿号、分号不属于断句标点。
-   */
-  const sentences = joined.match(
-    /[^。！？!?…]*[。！？!?]+[”’」』】）》"'’] *|[^。！？!?…]+…+[”’」』】）》"'’]?|[^。！？!?…]+$/gu
-  ) || [];
+  const sentences = [];
+  let buffer = "";
 
-  const cleaned = sentences
-    .map(sentence => sentence.trim())
-    .filter(Boolean);
+  const closingQuotes = new Set([
+    "”", "’", "」", "』", "】", "》", "）", ")", '"', "'"
+  ]);
 
-  // 对连续省略号等特殊情况做兜底
-  if (!cleaned.length && joined) cleaned.push(joined);
+  for (let i = 0; i < joined.length; i++) {
+    const ch = joined[i];
+    buffer += ch;
 
-  return cleaned
+    if ("。！？!?".includes(ch)) {
+      // 句末右引号跟随当前句子
+      while (
+        i + 1 < joined.length &&
+        closingQuotes.has(joined[i + 1])
+      ) {
+        buffer += joined[++i];
+      }
+
+      sentences.push(buffer.trim());
+      buffer = "";
+    }
+  }
+
+  if (buffer.trim()) {
+    sentences.push(buffer.trim());
+  }
+
+  return sentences
+    .filter(Boolean)
     .map(sentence => "<p>" + escapeHTML(sentence) + "</p>")
     .join("\n");
 }
@@ -573,18 +545,14 @@ $("start").addEventListener("click", async () => {
       );
 
       if (doc.text.length < 100) {
-        report.push(
-          "  警告：提取文字很少，可能是扫描版或字体编码异常。"
-        );
+        report.push("警告：提取文字很少，可能是扫描版或字体编码异常。");
       }
     }
 
     const chapters = makeChapters(documents);
 
     if (!chapters.length) {
-      throw new Error(
-        "没有提取到可用正文，请检查 PDF 是否包含文字层。"
-      );
+      throw new Error("没有提取到可用正文，请检查 PDF 是否包含文字层。");
     }
 
     const title = $("title").value.trim() || "PDF 合集";
@@ -620,8 +588,7 @@ $("start").addEventListener("click", async () => {
 
       spine += `<itemref idref="${id}"/>`;
 
-      toc +=
-        `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
+      toc += `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
 
       zip.file(
         `OEBPS/${href}`,
@@ -654,9 +621,7 @@ ${toc}
     );
 
     const uid = "pdf-epub-" + Date.now();
-    const modified = new Date()
-      .toISOString()
-      .replace(/\.\d{3}Z$/, "Z");
+    const modified = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
     zip.file(
       "OEBPS/content.opf",
@@ -713,18 +678,13 @@ ${manifest}
       report.join("\n") +
       `\n\n生成章节：${chapters.length}` +
       `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB` +
-      "\n\n请检查段落、目录、章节标题和正文顺序。"
+      "\n\n请检查正文、引号、段落及目录。"
     );
 
   } catch (error) {
     console.error(error);
     status("转换失败");
-
-    say(
-      "错误：" + (error.message || String(error)) +
-      "\n\n请检查 PDF 是否有文字层，或尝试减少文件数量。"
-    );
-
+    say("错误：" + (error.message || String(error)));
   } finally {
     $("start").disabled = files.length === 0;
     $("files").disabled = false;
