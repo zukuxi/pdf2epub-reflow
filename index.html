@@ -424,9 +424,13 @@ function makeChapters(documents) {
 }
 
 /*
- * 引号处理：
- * 同一对中文引号内的句子不按句末标点拆段。
- * PDF 单换行合并，空白行保留为段落边界。
+ * 段落处理规则：
+ * 1. 普通单换行视为 PDF 自动折行，合并为连续正文。
+ * 2. 空白行保留为段落边界。
+ * 3. 引号内部的句末标点不触发分段。
+ * 4. 对话闭合且句末标点位于闭引号前时，结束对话段。
+ * 5. 连续对话各自成段，后面的叙述另起一段。
+ * 6. 独立星号和常见拟声词保留为单独段落。
  */
 function paragraphs(text) {
   const source = String(text || "")
@@ -436,8 +440,9 @@ function paragraphs(text) {
   const sourceBlocks = source.split(/\n[ \t]*\n+/);
   const output = [];
 
-  const openQuotes = new Set(["“", "「", "『", "‘"]);
-  const closeQuotes = new Set(["”", "」", "』", "’", "）", ")"]);
+  const openingQuotes = new Set(["“", "「", "『", "‘"]);
+  const closingQuotes = new Set(["”", "」", "』", "’"]);
+  const endPunctuation = new Set(["。", "！", "？", "!", "?"]);
 
   function normalize(s) {
     s = s.replace(/[ \t]+/g, " ").trim();
@@ -447,73 +452,115 @@ function paragraphs(text) {
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
         "$1"
       );
+
       s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
+
       s = s.replace(
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
         "$1$2"
       );
+
       s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
-      s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
+      s = s.replace(/[ \t]+([）】])/g, "$1");
     }
 
-    return s;
+    return s.trim();
   }
 
-  function splitSentences(s) {
+  function endsSentence(s) {
+    return /[。！？!?][”」』’）】〉》]*$/.test(s.trim());
+  }
+
+  function splitParagraph(s) {
+    s = normalize(s);
+    if (!s) return [];
+
+    if (/^\*+$/.test(s)) return [s];
+
+    if (/^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s)) {
+      return [s];
+    }
+
     const result = [];
     let buffer = "";
     const quoteStack = [];
 
+    function flush() {
+      const value = normalize(buffer);
+      if (value) result.push(value);
+      buffer = "";
+    }
+
     for (let i = 0; i < s.length; i++) {
       const ch = s[i];
+      const previousQuoteDepth = quoteStack.length;
+
       buffer += ch;
 
-      if (openQuotes.has(ch)) {
+      if (openingQuotes.has(ch)) {
         quoteStack.push(ch);
-      } else if (closeQuotes.has(ch)) {
-        if (quoteStack.length) quoteStack.pop();
+        continue;
       }
 
-      // 引号内不拆句；引号外在句末标点处分段
-      if (quoteStack.length === 0 && "。！？!?".includes(ch)) {
-        if (buffer.trim()) result.push(buffer.trim());
-        buffer = "";
+      if (closingQuotes.has(ch)) {
+        if (quoteStack.length) quoteStack.pop();
+
+        // 闭引号时判断整句是否结束。
+        // 例如：“你看我的眼睛。是我没做，还是不敢做？”
+        if (
+          previousQuoteDepth > 0 &&
+          quoteStack.length === 0 &&
+          endsSentence(buffer)
+        ) {
+          flush();
+        }
+
+        continue;
+      }
+
+      // 引号内部不按句末标点拆分。
+      if (quoteStack.length > 0) continue;
+
+      // 引号外的普通句子按句末标点拆分。
+      if (endPunctuation.has(ch)) {
+        flush();
+        continue;
+      }
+
+      // 引号后的空格若连接的是叙述正文，
+      // 则在叙述开始前结束上一段。
+      if (ch === " " && buffer.length > 1) {
+        const previousChar = buffer[buffer.length - 2];
+        const rest = s.slice(i + 1);
+
+        if (
+          /[”」』]/.test(previousChar) &&
+          rest &&
+          !/^\s/.test(rest) &&
+          !openingQuotes.has(rest[0])
+        ) {
+          flush();
+        }
       }
     }
 
-    if (buffer.trim()) result.push(buffer.trim());
+    flush();
     return result;
   }
 
   for (const block of sourceBlocks) {
-    const lines = block.split("\n").map(line => line.trim()).filter(Boolean);
-    let buffer = [];
+    const lines = block
+      .split("\n")
+      .map(line => line.trim())
+      .filter(Boolean);
 
-    function flush() {
-      if (!buffer.length) return;
-      const joined = normalize(buffer.join(" "));
-      if (joined) output.push(...splitSentences(joined));
-      buffer = [];
-    }
+    if (!lines.length) continue;
 
-    for (const line of lines) {
-      if (/^\*+$/.test(line)) {
-        flush();
-        output.push(line);
-        continue;
-      }
+    // 连接 PDF 自动折行，例如：
+    // “耳边就传\n来了不像话的话”
+    const joined = lines.join(" ");
 
-      // 独立拟声词保留独立段落
-      if (/^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(line)) {
-        flush();
-        output.push(normalize(line));
-        continue;
-      }
-
-      buffer.push(line);
-    }
-
-    flush();
+    output.push(...splitParagraph(joined));
   }
 
   return output
@@ -555,7 +602,10 @@ $("start").addEventListener("click", async () => {
     for (let i = 0; i < files.length; i++) {
       const doc = await extractPDF(files[i], i);
       documents.push(doc);
-      report.push(`${doc.name}: ${doc.pageCount} 页，${doc.text.length} 个字符`);
+
+      report.push(
+        `${doc.name}: ${doc.pageCount} 页，${doc.text.length} 个字符`
+      );
 
       if (doc.text.length < 100) {
         report.push("警告：提取文字很少，可能是扫描版或字体编码异常。");
@@ -563,13 +613,17 @@ $("start").addEventListener("click", async () => {
     }
 
     const chapters = makeChapters(documents);
-    if (!chapters.length) throw new Error("没有提取到可用正文。");
+    if (!chapters.length) {
+      throw new Error("没有提取到可用正文。");
+    }
 
     const title = $("title").value.trim() || "PDF 合集";
     const author = $("author").value.trim() || "未知作者";
     const zip = new JSZip();
 
-    zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+    zip.file("mimetype", "application/epub+zip", {
+      compression: "STORE"
+    });
 
     zip.file("META-INF/container.xml", `<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -584,11 +638,17 @@ $("start").addEventListener("click", async () => {
       const id = `ch${i + 1}`;
       const href = `chapter${i + 1}.xhtml`;
 
-      manifest += `<item id="${id}" href="${href}" media-type="application/xhtml+xml"/>`;
+      manifest +=
+        `<item id="${id}" href="${href}" media-type="application/xhtml+xml"/>`;
+
       spine += `<itemref idref="${id}"/>`;
+
       toc += `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
 
-      zip.file(`OEBPS/${href}`, xhtml(chapter.title, paragraphs(chapter.text)));
+      zip.file(
+        `OEBPS/${href}`,
+        xhtml(chapter.title, paragraphs(chapter.text))
+      );
     });
 
     toc += "</ol>";
@@ -599,14 +659,17 @@ $("start").addEventListener("click", async () => {
 <body><nav epub:type="toc" id="toc"><h1>目录</h1>${toc}</nav></body>
 </html>`);
 
-    zip.file("OEBPS/style.css",
+    zip.file(
+      "OEBPS/style.css",
       "body{font-family:serif;line-height:1.8;margin:5%;}" +
       "h1{text-align:center;font-size:1.4em;margin:1.5em 0;}" +
       "p{text-indent:0 !important;margin:1em 0;}"
     );
 
     const uid = "pdf-epub-" + Date.now();
-    const modified = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const modified = new Date()
+      .toISOString()
+      .replace(/\.\d{3}Z$/, "Z");
 
     zip.file("OEBPS/content.opf", `<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid" xml:lang="zh">
@@ -633,12 +696,17 @@ ${manifest}
       mimeType: "application/epub+zip",
       compression: "DEFLATE",
       compressionOptions: { level: 6 }
-    }, meta => progress(75 + meta.percent * 0.25));
+    }, meta => {
+      progress(75 + meta.percent * 0.25);
+    });
 
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
+
     link.href = url;
-    link.download = (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
+    link.download =
+      (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
+
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -647,9 +715,13 @@ ${manifest}
 
     status("转换完成");
     progress(100);
-    say("转换完成！\n\n" + report.join("\n") +
+
+    say(
+      "转换完成！\n\n" +
+      report.join("\n") +
       `\n\n生成章节：${chapters.length}` +
-      `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB`);
+      `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB`
+    );
   } catch (error) {
     console.error(error);
     status("转换失败");
