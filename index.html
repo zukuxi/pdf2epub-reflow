@@ -148,11 +148,7 @@ function isCJKChar(c) {
   return /[\u3400-\u9fff\uf900-\ufaff]/.test(c || "");
 }
 
-/*
- * 清理提取文本。
- * 保留由坐标分析得到的空行。
- * 同一段内部的强制换行会在正文生成阶段连接。
- */
+/* 清理文本，保留段落间的空行 */
 function cleanText(s) {
   if (!s) return "";
 
@@ -184,13 +180,17 @@ function cleanText(s) {
     let result = block.join(" ");
 
     if ($("clean").checked) {
-      // 中文字符之间的多余空格
       result = result.replace(
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
         "$1"
       );
 
-      // 中文与标点之间的多余空格
+      // 中文标点前后清理多余空格
+      result = result.replace(
+        /([，。！？；：、])[ \t]+/g,
+        "$1"
+      );
+
       result = result.replace(
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
         "$1$2"
@@ -204,10 +204,7 @@ function cleanText(s) {
   }).filter(Boolean).join("\n\n").trim();
 }
 
-/*
- * 根据 PDF.js 的文字坐标重建行。
- * 相邻行距离明显增大时，标记为段落边界。
- */
+/* 根据 PDF 坐标重建文字行 */
 function extractLines(items) {
   const raw = [];
 
@@ -276,12 +273,9 @@ function extractLines(items) {
 
         const prevLatin = /[A-Za-z0-9]$/.test(prevChar);
         const nextLatin = /^[A-Za-z0-9]/.test(nextChar);
-        const prevCJK = isCJKChar(prevChar);
-        const nextCJK = isCJKChar(nextChar);
 
         if (
           prevLatin && nextLatin &&
-          !prevCJK && !nextCJK &&
           gap > Math.max(1.2, item.height * 0.12) &&
           !/\s$/.test(result)
         ) {
@@ -289,7 +283,6 @@ function extractLines(items) {
         }
       }
 
-      // 直接追加完整文字项目，不能裁掉引号或其他字符
       result += text;
       previous = item;
     }
@@ -441,68 +434,123 @@ function makeChapters(documents) {
 }
 
 /*
- * 正文处理规则：
- * 1. PDF 产生的强制换行先连接。
- * 2. 逗号、分号、顿号不触发分段。
- * 3. 句号、问号、感叹号后分段。
- * 4. 左右引号都保留。
- * 5. 使用逐字符扫描，不丢弃未匹配的文本。
+ * 段落规则：
+ * - 先保留原有空行所表示的段落边界。
+ * - 单行换行用于连接 PDF 自动折行。
+ * - 句末标点后分段。
+ * - 独立的 *、拟声词行单独保留。
+ * - 不用正则匹配整句，避免匹配时吞掉文字。
  */
 function paragraphs(text) {
-  let joined = String(text || "")
+  const source = String(text || "")
     .replace(/\u00a0/g, " ")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]*\n+[ \t]*/g, " ")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
+    .replace(/\r\n?/g, "\n");
 
-  if ($("clean").checked) {
-    joined = joined.replace(
-      /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
-      "$1"
-    );
-
-    joined = joined.replace(
-      /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
-      "$1$2"
-    );
-
-    joined = joined.replace(/([（【「『〔〈])[ \t]+/g, "$1");
-    joined = joined.replace(/[ \t]+([）】」』〕〉])/g, "$1");
-  }
-
-  const sentences = [];
-  let buffer = "";
+  const sourceBlocks = source.split(/\n[ \t]*\n+/);
+  const outputParagraphs = [];
 
   const closingQuotes = new Set([
     "”", "’", "」", "』", "】", "》", "）", ")", '"', "'"
   ]);
 
-  for (let i = 0; i < joined.length; i++) {
-    const ch = joined[i];
-    buffer += ch;
+  function normalize(s) {
+    s = s.replace(/[ \t]+/g, " ").trim();
 
-    if ("。！？!?".includes(ch)) {
-      // 句末右引号跟随当前句子
-      while (
-        i + 1 < joined.length &&
-        closingQuotes.has(joined[i + 1])
-      ) {
-        buffer += joined[++i];
+    if ($("clean").checked) {
+      s = s.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+        "$1"
+      );
+
+      s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
+
+      s = s.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
+        "$1$2"
+      );
+
+      s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
+      s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
+    }
+
+    return s;
+  }
+
+  function splitSentences(block) {
+    const joined = normalize(
+      block.replace(/\n+/g, " ")
+    );
+
+    const result = [];
+    let buffer = "";
+
+    for (let i = 0; i < joined.length; i++) {
+      const ch = joined[i];
+      buffer += ch;
+
+      if ("。！？!?".includes(ch)) {
+        while (
+          i + 1 < joined.length &&
+          closingQuotes.has(joined[i + 1])
+        ) {
+          buffer += joined[++i];
+        }
+
+        const sentence = buffer.trim();
+        if (sentence) result.push(sentence);
+        buffer = "";
+      }
+    }
+
+    if (buffer.trim()) result.push(buffer.trim());
+
+    return result;
+  }
+
+  for (const sourceBlock of sourceBlocks) {
+    const lines = sourceBlock
+      .split("\n")
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    let normalLines = [];
+
+    function flushNormalLines() {
+      if (!normalLines.length) return;
+
+      const block = normalLines.join("\n");
+      outputParagraphs.push(...splitSentences(block));
+      normalLines = [];
+    }
+
+    for (const line of lines) {
+      // 单独的星号分隔符，不与正文合并
+      if (/^\*+$/.test(line)) {
+        flushNormalLines();
+        outputParagraphs.push(line);
+        continue;
       }
 
-      sentences.push(buffer.trim());
-      buffer = "";
+      // 独立拟声词，如“嚓嚓—”“欻欻—”
+      // 仅在整行是拟声词时单独成段
+      if (
+        /^[\u3400-\u9fff]{1,8}[—–\-…！!？?。]*$/.test(line) &&
+        /[—–\-…]$/.test(line)
+      ) {
+        flushNormalLines();
+        outputParagraphs.push(line);
+        continue;
+      }
+
+      normalLines.push(line);
     }
+
+    flushNormalLines();
   }
 
-  if (buffer.trim()) {
-    sentences.push(buffer.trim());
-  }
-
-  return sentences
+  return outputParagraphs
     .filter(Boolean)
-    .map(sentence => "<p>" + escapeHTML(sentence) + "</p>")
+    .map(p => "<p>" + escapeHTML(p) + "</p>")
     .join("\n");
 }
 
@@ -613,11 +661,12 @@ ${toc}
 </html>`
     );
 
+    // 取消段落首行缩进，避免阅读器每段开头空两格
     zip.file(
       "OEBPS/style.css",
       "body{font-family:serif;line-height:1.8;margin:5%;}" +
       "h1{text-align:center;font-size:1.4em;margin:1.5em 0;}" +
-      "p{text-indent:2em;margin:1em 0;}"
+      "p{text-indent:0;margin:1em 0;}"
     );
 
     const uid = "pdf-epub-" + Date.now();
