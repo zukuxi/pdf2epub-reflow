@@ -168,9 +168,8 @@ function isCJKChar(c) {
 }
 
 /*
- * 清理文字，但不再无条件删除所有换行。
- * extractLines 会先用 PDF 坐标判断段落；
- * 这里仅清理每段内部的字符与空格。
+ * 清理提取文字。
+ * 空行暂时保留；同一段内部的强制换行会在 EPUB 输出时处理。
  */
 function cleanText(s) {
   if (!s) return "";
@@ -179,12 +178,10 @@ function cleanText(s) {
        .replace(/\r\n?/g, "\n")
        .replace(/([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g, "$1$2");
 
-  // 先清理每行两侧的空格
   const lines = s.split("\n").map(line =>
     line.replace(/[ \t]+/g, " ").trim()
   );
 
-  // 保留已有的空行作为段落边界
   const blocks = [];
   let current = [];
 
@@ -202,17 +199,12 @@ function cleanText(s) {
   if (current.length) blocks.push(current);
 
   function joinParagraph(block) {
-    // 只有同一个段落内部的行才合并
     let result = block.join(" ");
 
     if ($("clean").checked) {
-      // 删除中文字符之间的多余空格
       result = result.replace(CJK_SPACE_LEFT, "$1");
-
-      // 中文与紧随其后的标点之间不需要空格
       result = result.replace(CJK_PUNCT_SPACE, "$1$2");
 
-      // 去掉中文开括号之后、闭括号之前的多余空格
       result = result.replace(
         /([（【「『〔〈])[ \t]+/g, "$1"
       );
@@ -220,7 +212,6 @@ function cleanText(s) {
         /[ \t]+([）】」』〕〉])/g, "$1"
       );
 
-      // 清理多余空格
       result = result.replace(/[ \t]{2,}/g, " ");
     }
 
@@ -235,9 +226,8 @@ function cleanText(s) {
 }
 
 /*
- * 根据 PDF.js 返回的文字项目和坐标重建行。
- * 先排序，再计算相邻行距，较大的行距视为段落边界。
- * 不能只用换行符判断，因为 PDF 往往每行都强制换行。
+ * 根据 PDF 文字坐标重建行。
+ * 利用行距估计原始段落边界。
  */
 function extractLines(items) {
   const raw = [];
@@ -258,7 +248,6 @@ function extractLines(items) {
 
   if (!raw.length) return "";
 
-  // 按纵向坐标聚合成行；同一基线上的文字允许少量坐标差异
   raw.sort((a, b) => {
     if (Math.abs(a.y - b.y) > 2.5) return b.y - a.y;
     return a.x - b.x;
@@ -277,7 +266,6 @@ function extractLines(items) {
         break;
       }
 
-      // 已经越过当前可能的行，无需继续找
       if (candidate.y - item.y > 3) break;
     }
 
@@ -314,11 +302,6 @@ function extractLines(items) {
         const prevCJK = isCJKChar(prevChar);
         const nextCJK = isCJKChar(nextChar);
 
-        /*
-         * PDF 文字项目之间不再一律加空格。
-         * 英文/数字之间根据位置间距补空格；
-         * 中文相邻字符不插入空格。
-         */
         if (
           prevLatin &&
           nextLatin &&
@@ -331,7 +314,7 @@ function extractLines(items) {
         } else if (
           !prevCJK &&
           !nextCJK &&
-          /\s$/.test(prevText) === false &&
+          !/\s$/.test(prevText) &&
           /^\s/.test(text)
         ) {
           result += " ";
@@ -349,25 +332,18 @@ function extractLines(items) {
     line.text = joinItems(line);
   }
 
-  // 去掉空行
   const nonEmpty = lines.filter(line => line.text);
-
   if (!nonEmpty.length) return "";
 
-  // 估算本页的常规行距，避免固定阈值不适合不同字号的 PDF
   const gaps = [];
 
   for (let i = 1; i < nonEmpty.length; i++) {
     const gap = Math.abs(nonEmpty[i - 1].y - nonEmpty[i].y);
-
-    if (gap > 0) {
-      gaps.push(gap);
-    }
+    if (gap > 0) gaps.push(gap);
   }
 
   gaps.sort((a, b) => a - b);
 
-  // 采用较低分位数估算常规行距，减少段落大间距影响
   let typicalGap = 0;
 
   if (gaps.length) {
@@ -387,18 +363,12 @@ function extractLines(items) {
       const previous = nonEmpty[i - 1];
       const gap = Math.abs(previous.y - line.y);
 
-      /*
-       * 如果相邻行之间的距离明显大于常规行距，
-       * 在两行之间插入空行，供后续保留为独立段落。
-       */
       const threshold = Math.max(
         typicalGap * 1.55,
         (previous.height + line.height) * 0.95
       );
 
-      if (gap > threshold) {
-        output.push("");
-      }
+      if (gap > threshold) output.push("");
     }
 
     output.push(line.text);
@@ -420,7 +390,6 @@ async function extractPDF(file, fileIndex) {
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
 
-    // 每页独立提取段落，避免跨页坐标被错误比较
     pages.push(extractLines(content.items));
 
     progress(60 * (fileIndex + p / pdf.numPages) / files.length);
@@ -430,10 +399,6 @@ async function extractPDF(file, fileIndex) {
     }
   }
 
-  /*
-   * 页与页之间使用空行，防止相邻页面正文直接粘连。
-   * 页内段落边界由坐标间距推断。
-   */
   return {
     name: file.name.replace(/\.pdf$/i, ""),
     pageCount: pdf.numPages,
@@ -441,7 +406,6 @@ async function extractPDF(file, fileIndex) {
   };
 }
 
-/* 章节标题识别规则 */
 const headingPattern =
   /^(chapter|chap(?:ter)?\.?\s*[\w.-]+|第[0-9一二三四五六七八九十百零〇两]+[章节卷部篇回].*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[:：\-—].*)?$/i;
 
@@ -463,9 +427,7 @@ function splitHeadings(text, fallbackTitle) {
     if (isHeading && buffer.join("\n").trim().length > 80) {
       const body = buffer.join("\n").trim();
 
-      if (body) {
-        chapters.push({ title, text: body });
-      }
+      if (body) chapters.push({ title, text: body });
 
       title = t;
       buffer = [];
@@ -475,10 +437,7 @@ function splitHeadings(text, fallbackTitle) {
   }
 
   const last = buffer.join("\n").trim();
-
-  if (last) {
-    chapters.push({ title, text: last });
-  }
+  if (last) chapters.push({ title, text: last });
 
   return chapters;
 }
@@ -498,20 +457,13 @@ function makeChapters(documents) {
             if (i === 0 && part.title === doc.name) {
               part.title = doc.name + " — 正文";
             }
-
             chapters.push(part);
           });
         } else {
-          chapters.push({
-            title: doc.name,
-            text: doc.text
-          });
+          chapters.push({ title: doc.name, text: doc.text });
         }
       } else {
-        chapters.push({
-          title: doc.name,
-          text: doc.text
-        });
+        chapters.push({ title: doc.name, text: doc.text });
       }
     }
   } else {
@@ -525,15 +477,60 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
-/* 每个空行分隔的段落生成独立 XHTML 段落 */
+/*
+ * 新版正文排版：
+ * 1. 先将 PDF 强制换行连接起来。
+ * 2. 不在逗号、顿号、分号、冒号处换行。
+ * 3. 在句号、问号、感叹号后另起段落。
+ * 4. 句末引号会跟随句子，不会单独掉到下一段。
+ * 5. 中文字符之间的多余空格会清理。
+ */
 function paragraphs(text) {
-  return text.split(/\n[ \t]*\n+/)
-    .map(block => {
-      const content = escapeHTML(block.trim())
-        .replace(/\n/g, " ");
+  let joined = String(text || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]*\n+[ \t]*/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 
-      return "<p>" + content + "</p>";
-    })
+  if ($("clean").checked) {
+    joined = joined.replace(
+      /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+      "$1"
+    );
+
+    joined = joined.replace(
+      /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
+      "$1$2"
+    );
+
+    joined = joined.replace(
+      /([（【「『〔〈])[ \t]+/g, "$1"
+    );
+
+    joined = joined.replace(
+      /[ \t]+([）】」』〕〉])/g, "$1"
+    );
+  }
+
+  /*
+   * 每个句末标点后分段。
+   * 保留中文/英文引号，避免引号被拆到下一段。
+   * 逗号、顿号、分号不属于断句标点。
+   */
+  const sentences = joined.match(
+    /[^。！？!?…]*[。！？!?]+[”’」』】）》"'’] *|[^。！？!?…]+…+[”’」』】）》"'’]?|[^。！？!?…]+$/gu
+  ) || [];
+
+  const cleaned = sentences
+    .map(sentence => sentence.trim())
+    .filter(Boolean);
+
+  // 对连续省略号等特殊情况做兜底
+  if (!cleaned.length && joined) cleaned.push(joined);
+
+  return cleaned
+    .map(sentence => "<p>" + escapeHTML(sentence) + "</p>")
     .join("\n");
 }
 
@@ -594,7 +591,6 @@ $("start").addEventListener("click", async () => {
     const author = $("author").value.trim() || "未知作者";
     const zip = new JSZip();
 
-    // EPUB 规范要求 mimetype 是第一个文件且不压缩
     zip.file("mimetype", "application/epub+zip", {
       compression: "STORE"
     });
@@ -654,7 +650,7 @@ ${toc}
       "OEBPS/style.css",
       "body{font-family:serif;line-height:1.8;margin:5%;}" +
       "h1{text-align:center;font-size:1.4em;margin:1.5em 0;}" +
-      "p{text-indent:2em;margin:.6em 0;}"
+      "p{text-indent:2em;margin:1em 0;}"
     );
 
     const uid = "pdf-epub-" + Date.now();
