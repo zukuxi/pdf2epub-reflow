@@ -50,7 +50,7 @@ progress{width:100%}
   </label>
   <label>
     <input id="clean" type="checkbox" checked>
-    清理多余空行和常见断词
+    清理强制换行、中文多余空格和常见断词
   </label>
   <button id="start" class="primary" disabled>开始转换并下载 EPUB</button>
 </section>
@@ -78,9 +78,17 @@ if (window.pdfjsLib) {
     "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 }
 
-function say(message) { $("log").textContent = message; }
-function status(message) { $("status").textContent = message; }
-function progress(value) { $("progress").value = value; }
+function say(message) {
+  $("log").textContent = message;
+}
+
+function status(message) {
+  $("status").textContent = message;
+}
+
+function progress(value) {
+  $("progress").value = value;
+}
 
 function renderFiles() {
   const box = $("fileList");
@@ -120,12 +128,15 @@ function renderFiles() {
         }
         renderFiles();
       };
+
       row.appendChild(button);
     }
+
     box.appendChild(row);
   });
 
   $("start").disabled = false;
+
   if (!$("title").value && files.length) {
     $("title").value = files[0].name.replace(/\.pdf$/i, "");
   }
@@ -137,43 +148,204 @@ $("files").addEventListener("change", event => {
   say(files.length ? "文件已载入，可以开始转换。" : "请选择 PDF。");
 });
 
+/* HTML 转义，防止书名、章节标题中的特殊字符破坏 EPUB */
 function escapeHTML(s) {
-  return String(s).replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
+/*
+ * 正文清理：
+ * 1. 修复英文单词被连字符断开的情况。
+ * 2. 合并 PDF 每一行末尾的强制换行。
+ * 3. 尽量保留真正的段落分隔。
+ * 4. 清除中文字符之间多余的空格。
+ */
 function cleanText(s) {
-  if (!$("clean").checked) return s.trim();
-  return s.replace(/\u00a0/g, " ")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/([A-Za-z])-\n([a-z])/g, "$1$2")
-    .replace(/\n{3,}/g, "\n\n")
+  if (!s) return "";
+
+  if (!$("clean").checked) {
+    return s.replace(/\r\n?/g, "\n").trim();
+  }
+
+  s = s.replace(/\u00a0/g, " ")
+       .replace(/\r\n?/g, "\n");
+
+  // 修复英文断词，例如 inter-\nnational -> international
+  s = s.replace(
+    /([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g,
+    "$1$2"
+  );
+
+  // 先清理每一行两侧的空格
+  let lines = s.split("\n").map(line =>
+    line.replace(/[ \t]+/g, " ").trim()
+  );
+
+  // 空行用于识别段落边界；普通换行默认合并
+  const blocks = [];
+  let current = [];
+
+  for (const line of lines) {
+    if (!line) {
+      if (current.length) {
+        blocks.push(current);
+        current = [];
+      }
+    } else {
+      current.push(line);
+    }
+  }
+
+  if (current.length) blocks.push(current);
+
+  const isCJK = c =>
+    /[\u3400-\u9fff\uf900-\ufaff]/.test(c || "");
+
+  const noSpaceBefore =
+    /^[，。！？；：、）》】」』〕〉％…]/;
+
+  const noSpaceAfter =
+    /[（【「『〔〈]$/;
+
+  function joinLines(block) {
+    let result = "";
+
+    for (const line of block) {
+      if (!result) {
+        result = line;
+        continue;
+      }
+
+      const prev = result.slice(-1);
+      const next = line[0];
+
+      // 中文相邻字符直接连接，不插入空格
+      if (
+        isCJK(prev) ||
+        isCJK(next) ||
+        noSpaceBefore.test(next) ||
+        noSpaceAfter.test(prev)
+      ) {
+        result += line;
+      } else {
+        // 英文相邻行合并时保留单词分隔
+        result += " " + line;
+      }
+    }
+
+    // 删除中文字符之间的空格
+    result = result.replace(
+      /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+      "$1"
+    );
+
+    // 删除中文与中文标点之间不合理的空格
+    result = result.replace(
+      /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉])/g,
+      "$1$2"
+    );
+
+    return result.trim();
+  }
+
+  return blocks
+    .map(joinLines)
+    .filter(Boolean)
+    .join("\n\n")
     .trim();
 }
 
+/*
+ * 从 PDF.js 的文字项目重建文本行。
+ * 中文文字片段之间不再一律插入空格；
+ * 英文单词之间则依据原始坐标间距决定是否加空格。
+ */
 function extractLines(items) {
   const lines = [];
 
   for (const item of items) {
     if (!item.str || !item.str.trim()) continue;
+
     const x = item.transform ? item.transform[4] : 0;
     const y = item.transform ? item.transform[5] : 0;
+    const fontSize = Math.abs(
+      item.transform ? item.transform[3] : 12
+    ) || 12;
 
+    // 同一基线上的文字项目合并成一行
     let line = lines.find(row => Math.abs(row.y - y) < 2.5);
+
     if (!line) {
       line = { y, items: [] };
       lines.push(line);
     }
-    line.items.push({ x, text: item.str });
+
+    line.items.push({
+      x,
+      width: Number(item.width) || 0,
+      text: item.str,
+      fontSize
+    });
   }
 
+  // PDF 坐标原点通常在页面底部，因此 y 从大到小排序
   lines.sort((a, b) => b.y - a.y);
 
+  function isCJK(c) {
+    return /[\u3400-\u9fff\uf900-\ufaff]/.test(c || "");
+  }
+
+  function isLatinOrDigit(c) {
+    return /[A-Za-z0-9]/.test(c || "");
+  }
+
+  function joinItems(items) {
+    items.sort((a, b) => a.x - b.x);
+
+    let result = "";
+    let previous = null;
+
+    for (const item of items) {
+      const text = item.text.trim();
+      if (!text) continue;
+
+      if (previous) {
+        const prevText = previous.text.trim();
+        const prevChar = prevText.slice(-1);
+        const nextChar = text[0];
+
+        const prevEnd = previous.x + previous.width;
+        const gap = item.x - prevEnd;
+
+        /*
+         * 只给疑似英文单词、数字之间补空格。
+         * 中文与中文之间不因坐标间距而插入空格。
+         */
+        const needsSpace =
+          !isCJK(prevChar) &&
+          !isCJK(nextChar) &&
+          isLatinOrDigit(prevChar) &&
+          isLatinOrDigit(nextChar) &&
+          gap > Math.max(1.5, item.fontSize * 0.15);
+
+        if (needsSpace && !/\s$/.test(result)) {
+          result += " ";
+        }
+      }
+
+      result += text;
+      previous = item;
+    }
+
+    return result.replace(/[ \t]+/g, " ").trim();
+  }
+
   return lines.map(line =>
-    line.items.sort((a, b) => a.x - b.x)
-      .map(item => item.text).join(" ")
-      .replace(/[ \t]+/g, " ").trim()
+    joinItems(line.items)
   ).filter(Boolean).join("\n");
 }
 
@@ -189,21 +361,28 @@ async function extractPDF(file, fileIndex) {
 
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
+
     pages.push(extractLines(content.items));
 
     progress(60 * (fileIndex + p / pdf.numPages) / files.length);
+
     if (p % 8 === 0) {
       await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
 
+  /*
+   * 页面之间先用单换行连接，避免每一页都被强制当作新段落。
+   * cleanText 会负责合并普通行，并保留提取到的空行分隔。
+   */
   return {
     name: file.name.replace(/\.pdf$/i, ""),
     pageCount: pdf.numPages,
-    text: cleanText(pages.join("\n\n"))
+    text: cleanText(pages.join("\n"))
   };
 }
 
+/* 章节标题识别规则 */
 const headingPattern =
   /^(chapter|chapter\s+[\w.-]+|chap(?:ter)?\.?\s*[\w.-]+|第[0-9一二三四五六七八九十百零〇两]+[章节卷部篇回].*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[:：\-—].*)?$/i;
 
@@ -215,20 +394,29 @@ function splitHeadings(text, fallbackTitle) {
 
   for (const line of lines) {
     const t = line.trim();
-    const isHeading = t.length > 0 && t.length <= 90 &&
+
+    const isHeading =
+      t.length > 0 &&
+      t.length <= 90 &&
       headingPattern.test(t);
 
     if (isHeading && buffer.join("\n").trim().length > 80) {
       const body = buffer.join("\n").trim();
+
       if (body) chapters.push({ title, text: body });
+
       title = t;
       buffer = [];
     }
+
     buffer.push(line);
   }
 
   const last = buffer.join("\n").trim();
-  if (last) chapters.push({ title, text: last });
+
+  if (last) {
+    chapters.push({ title, text: last });
+  }
 
   return chapters;
 }
@@ -242,22 +430,33 @@ function makeChapters(documents) {
     for (const doc of documents) {
       if (detect) {
         const parts = splitHeadings(doc.text, doc.name);
+
         if (parts.length > 1) {
           parts.forEach((part, i) => {
             if (i === 0 && part.title === doc.name) {
               part.title = doc.name + " — 正文";
             }
+
             chapters.push(part);
           });
         } else {
-          chapters.push({ title: doc.name, text: doc.text });
+          chapters.push({
+            title: doc.name,
+            text: doc.text
+          });
         }
       } else {
-        chapters.push({ title: doc.name, text: doc.text });
+        chapters.push({
+          title: doc.name,
+          text: doc.text
+        });
       }
     }
   } else {
-    const merged = documents.map(doc => doc.text).join("\n\n");
+    const merged = documents
+      .map(doc => doc.text)
+      .join("\n\n");
+
     chapters = detect
       ? splitHeadings(merged, "正文")
       : [{ title: "正文", text: merged }];
@@ -266,18 +465,30 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
+/* 将正文段落转换为 XHTML */
 function paragraphs(text) {
-  return text.split(/\n{2,}/).map(block =>
-    "<p>" + escapeHTML(block.trim()).replace(/\n/g, "<br/>") + "</p>"
-  ).join("\n");
+  return text.split(/\n{2,}/)
+    .map(block => {
+      const content = escapeHTML(block.trim())
+        .replace(/\n/g, "<br/>");
+
+      return "<p>" + content + "</p>";
+    })
+    .join("\n");
 }
 
 function xhtml(title, body) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh">
-<head><title>${escapeHTML(title)}</title>
+<head>
+<title>${escapeHTML(title)}</title>
 <link rel="stylesheet" type="text/css" href="style.css"/>
-</head><body><h1>${escapeHTML(title)}</h1>${body}</body></html>`;
+</head>
+<body>
+<h1>${escapeHTML(title)}</h1>
+${body}
+</body>
+</html>`;
 }
 
 $("start").addEventListener("click", async () => {
@@ -290,6 +501,7 @@ $("start").addEventListener("click", async () => {
 
   $("start").disabled = true;
   $("files").disabled = true;
+  progress(0);
 
   try {
     const documents = [];
@@ -297,36 +509,48 @@ $("start").addEventListener("click", async () => {
 
     for (let i = 0; i < files.length; i++) {
       const doc = await extractPDF(files[i], i);
+
       documents.push(doc);
+
       report.push(
         `${doc.name}: ${doc.pageCount} 页，${doc.text.length} 个字符`
       );
 
       if (doc.text.length < 100) {
-        report.push("  警告：提取文字很少，可能是扫描版或字体编码异常。");
+        report.push(
+          "  警告：提取文字很少，可能是扫描版或字体编码异常。"
+        );
       }
     }
 
-    let chapters = makeChapters(documents);
+    const chapters = makeChapters(documents);
+
     if (!chapters.length) {
-      throw new Error("没有提取到可用正文，请检查 PDF 是否包含文字层。");
+      throw new Error(
+        "没有提取到可用正文，请检查 PDF 是否包含文字层。"
+      );
     }
 
     const title = $("title").value.trim() || "PDF 合集";
     const author = $("author").value.trim() || "未知作者";
     const zip = new JSZip();
 
-    // EPUB 规范要求 mimetype 是第一个文件且不压缩。
+    // EPUB 规范要求 mimetype 是第一个文件且不压缩
     zip.file("mimetype", "application/epub+zip", {
       compression: "STORE"
     });
 
-    zip.file("META-INF/container.xml",
+    zip.file(
+      "META-INF/container.xml",
       `<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0"
  xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-<rootfiles><rootfile full-path="OEBPS/content.opf"
- media-type="application/oebps-package+xml"/></rootfiles></container>`);
+<rootfiles>
+<rootfile full-path="OEBPS/content.opf"
+ media-type="application/oebps-package+xml"/>
+</rootfiles>
+</container>`
+    );
 
     let manifest = "";
     let spine = "";
@@ -336,35 +560,51 @@ $("start").addEventListener("click", async () => {
       const id = `ch${i + 1}`;
       const href = `chapter${i + 1}.xhtml`;
 
-      manifest += `<item id="${id}" href="${href}"
-        media-type="application/xhtml+xml"/>`;
-      spine += `<itemref idref="${id}"/>`;
-      toc += `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
+      manifest +=
+        `<item id="${id}" href="${href}" media-type="application/xhtml+xml"/>`;
 
-      zip.file(`OEBPS/${href}`, xhtml(
-        chapter.title, paragraphs(chapter.text)
-      ));
+      spine += `<itemref idref="${id}"/>`;
+
+      toc +=
+        `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
+
+      zip.file(
+        `OEBPS/${href}`,
+        xhtml(chapter.title, paragraphs(chapter.text))
+      );
     });
 
     toc += "</ol>";
 
-    zip.file("OEBPS/nav.xhtml",
+    zip.file(
+      "OEBPS/nav.xhtml",
       `<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml"
  xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
-<head><title>目录</title></head><body>
-<nav epub:type="toc" id="toc"><h1>目录</h1>${toc}</nav>
-</body></html>`);
+<head><title>目录</title></head>
+<body>
+<nav epub:type="toc" id="toc">
+<h1>目录</h1>
+${toc}
+</nav>
+</body>
+</html>`
+    );
 
-    zip.file("OEBPS/style.css",
+    zip.file(
+      "OEBPS/style.css",
       "body{font-family:serif;line-height:1.8;margin:5%;}" +
       "h1{text-align:center;font-size:1.4em;margin:1.5em 0;}" +
-      "p{text-indent:2em;margin:.6em 0;}");
+      "p{text-indent:2em;margin:.6em 0;}"
+    );
 
     const uid = "pdf-epub-" + Date.now();
-    const modified = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const modified = new Date()
+      .toISOString()
+      .replace(/\.\d{3}Z$/, "Z");
 
-    zip.file("OEBPS/content.opf",
+    zip.file(
+      "OEBPS/content.opf",
       `<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0"
  unique-identifier="uid" xml:lang="zh">
@@ -376,11 +616,14 @@ $("start").addEventListener("click", async () => {
 <meta property="dcterms:modified">${modified}</meta>
 </metadata>
 <manifest>
-<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml"
- properties="nav"/>
+<item id="nav" href="nav.xhtml"
+ media-type="application/xhtml+xml" properties="nav"/>
 ${manifest}
 <item id="css" href="style.css" media-type="text/css"/>
-</manifest><spine>${spine}</spine></package>`);
+</manifest>
+<spine>${spine}</spine>
+</package>`
+    );
 
     status("正在打包 EPUB……");
     progress(75);
@@ -390,33 +633,50 @@ ${manifest}
       mimeType: "application/epub+zip",
       compression: "DEFLATE",
       compressionOptions: { level: 6 }
-    }, meta => progress(75 + meta.percent * 0.25));
+    }, meta => {
+      progress(75 + meta.percent * 0.25);
+    });
 
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
+
     link.href = url;
-    link.download = (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
+    link.download =
+      (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
+
     document.body.appendChild(link);
     link.click();
     link.remove();
+
     setTimeout(() => URL.revokeObjectURL(url), 30000);
 
     status("转换完成");
     progress(100);
-    say("转换完成！\n\n" + report.join("\n") +
+
+    say(
+      "转换完成！\n\n" +
+      report.join("\n") +
       `\n\n生成章节：${chapters.length}` +
       `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB` +
-      "\n\n请检查目录、段落顺序和章节标题。");
+      "\n\n请检查目录、段落顺序和章节标题。"
+    );
+
   } catch (error) {
     console.error(error);
+
     status("转换失败");
-    say("错误：" + (error.message || String(error)) +
-      "\n\n请检查 PDF 是否有文字层，或尝试减少文件数量。");
+
+    say(
+      "错误：" + (error.message || String(error)) +
+      "\n\n请检查 PDF 是否有文字层，或尝试减少文件数量。"
+    );
+
   } finally {
     $("start").disabled = files.length === 0;
     $("files").disabled = false;
   }
 });
+
 })();
 </script>
 </body>
