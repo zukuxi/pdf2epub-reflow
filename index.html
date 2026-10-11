@@ -144,11 +144,6 @@ $("files").addEventListener("change", event => {
   say(files.length ? "文件已载入，可以开始转换。" : "请选择 PDF。");
 });
 
-function isCJKChar(c) {
-  return /[\u3400-\u9fff\uf900-\ufaff]/.test(c || "");
-}
-
-/* 清理提取文本，保留段落边界 */
 function cleanText(s) {
   if (!s) return "";
 
@@ -200,7 +195,6 @@ function cleanText(s) {
   }).filter(Boolean).join("\n\n").trim();
 }
 
-/* 根据 PDF 坐标重建文字行 */
 function extractLines(items) {
   const raw = [];
 
@@ -430,12 +424,9 @@ function makeChapters(documents) {
 }
 
 /*
- * 段落处理：
- * 1. 空白行分隔原有段落。
- * 2. 单换行通常是 PDF 自动折行，连接起来。
- * 3. 独立的 * 和拟声词行保留为独立段落。
- * 4. 句末标点和其后的右引号一起保留。
- * 5. 不通过整句匹配正则删除字符。
+ * 引号处理：
+ * 同一对中文引号内的句子不按句末标点拆段。
+ * PDF 单换行合并，空白行保留为段落边界。
  */
 function paragraphs(text) {
   const source = String(text || "")
@@ -445,9 +436,8 @@ function paragraphs(text) {
   const sourceBlocks = source.split(/\n[ \t]*\n+/);
   const output = [];
 
-  const closingQuotes = new Set([
-    "”", "’", "」", "』", "】", "》", "）", ")", '"', "'"
-  ]);
+  const openQuotes = new Set(["“", "「", "『", "‘"]);
+  const closeQuotes = new Set(["”", "」", "』", "’", "）", ")"]);
 
   function normalize(s) {
     s = s.replace(/[ \t]+/g, " ").trim();
@@ -457,14 +447,11 @@ function paragraphs(text) {
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
         "$1"
       );
-
       s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
-
       s = s.replace(
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
         "$1$2"
       );
-
       s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
       s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
     }
@@ -475,18 +462,20 @@ function paragraphs(text) {
   function splitSentences(s) {
     const result = [];
     let buffer = "";
+    const quoteStack = [];
 
     for (let i = 0; i < s.length; i++) {
-      buffer += s[i];
+      const ch = s[i];
+      buffer += ch;
 
-      if ("。！？!?".includes(s[i])) {
-        while (
-          i + 1 < s.length &&
-          closingQuotes.has(s[i + 1])
-        ) {
-          buffer += s[++i];
-        }
+      if (openQuotes.has(ch)) {
+        quoteStack.push(ch);
+      } else if (closeQuotes.has(ch)) {
+        if (quoteStack.length) quoteStack.pop();
+      }
 
+      // 引号内不拆句；引号外在句末标点处分段
+      if (quoteStack.length === 0 && "。！？!?".includes(ch)) {
         if (buffer.trim()) result.push(buffer.trim());
         buffer = "";
       }
@@ -497,33 +486,24 @@ function paragraphs(text) {
   }
 
   for (const block of sourceBlocks) {
-    const lines = block
-      .split("\n")
-      .map(line => line.trim())
-      .filter(Boolean);
-
-    if (!lines.length) continue;
-
+    const lines = block.split("\n").map(line => line.trim()).filter(Boolean);
     let buffer = [];
 
     function flush() {
       if (!buffer.length) return;
-
       const joined = normalize(buffer.join(" "));
       if (joined) output.push(...splitSentences(joined));
-
       buffer = [];
     }
 
     for (const line of lines) {
-      // 独立星号分隔符
       if (/^\*+$/.test(line)) {
         flush();
         output.push(line);
         continue;
       }
 
-      // 独立的拟声词，例如“嚓嚓—”“欻欻—”
+      // 独立拟声词保留独立段落
       if (/^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(line)) {
         flush();
         output.push(normalize(line));
@@ -575,10 +555,7 @@ $("start").addEventListener("click", async () => {
     for (let i = 0; i < files.length; i++) {
       const doc = await extractPDF(files[i], i);
       documents.push(doc);
-
-      report.push(
-        `${doc.name}: ${doc.pageCount} 页，${doc.text.length} 个字符`
-      );
+      report.push(`${doc.name}: ${doc.pageCount} 页，${doc.text.length} 个字符`);
 
       if (doc.text.length < 100) {
         report.push("警告：提取文字很少，可能是扫描版或字体编码异常。");
@@ -586,30 +563,18 @@ $("start").addEventListener("click", async () => {
     }
 
     const chapters = makeChapters(documents);
-
-    if (!chapters.length) {
-      throw new Error("没有提取到可用正文，请检查 PDF 是否包含文字层。");
-    }
+    if (!chapters.length) throw new Error("没有提取到可用正文。");
 
     const title = $("title").value.trim() || "PDF 合集";
     const author = $("author").value.trim() || "未知作者";
     const zip = new JSZip();
 
-    zip.file("mimetype", "application/epub+zip", {
-      compression: "STORE"
-    });
+    zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
 
-    zip.file(
-      "META-INF/container.xml",
-      `<?xml version="1.0" encoding="UTF-8"?>
-<container version="1.0"
- xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-<rootfiles>
-<rootfile full-path="OEBPS/content.opf"
- media-type="application/oebps-package+xml"/>
-</rootfiles>
-</container>`
-    );
+    zip.file("META-INF/container.xml", `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>`);
 
     let manifest = "";
     let spine = "";
@@ -619,39 +584,22 @@ $("start").addEventListener("click", async () => {
       const id = `ch${i + 1}`;
       const href = `chapter${i + 1}.xhtml`;
 
-      manifest +=
-        `<item id="${id}" href="${href}" media-type="application/xhtml+xml"/>`;
-
+      manifest += `<item id="${id}" href="${href}" media-type="application/xhtml+xml"/>`;
       spine += `<itemref idref="${id}"/>`;
-
       toc += `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
 
-      zip.file(
-        `OEBPS/${href}`,
-        xhtml(chapter.title, paragraphs(chapter.text))
-      );
+      zip.file(`OEBPS/${href}`, xhtml(chapter.title, paragraphs(chapter.text)));
     });
 
     toc += "</ol>";
 
-    zip.file(
-      "OEBPS/nav.xhtml",
-      `<?xml version="1.0" encoding="UTF-8"?>
-<html xmlns="http://www.w3.org/1999/xhtml"
- xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
+    zip.file("OEBPS/nav.xhtml", `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
 <head><title>目录</title></head>
-<body>
-<nav epub:type="toc" id="toc">
-<h1>目录</h1>
-${toc}
-</nav>
-</body>
-</html>`
-    );
+<body><nav epub:type="toc" id="toc"><h1>目录</h1>${toc}</nav></body>
+</html>`);
 
-    // 不设置段首缩进
-    zip.file(
-      "OEBPS/style.css",
+    zip.file("OEBPS/style.css",
       "body{font-family:serif;line-height:1.8;margin:5%;}" +
       "h1{text-align:center;font-size:1.4em;margin:1.5em 0;}" +
       "p{text-indent:0 !important;margin:1em 0;}"
@@ -660,11 +608,8 @@ ${toc}
     const uid = "pdf-epub-" + Date.now();
     const modified = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
-    zip.file(
-      "OEBPS/content.opf",
-      `<?xml version="1.0" encoding="UTF-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0"
- unique-identifier="uid" xml:lang="zh">
+    zip.file("OEBPS/content.opf", `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid" xml:lang="zh">
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
 <dc:identifier id="uid">${uid}</dc:identifier>
 <dc:title>${escapeHTML(title)}</dc:title>
@@ -673,14 +618,12 @@ ${toc}
 <meta property="dcterms:modified">${modified}</meta>
 </metadata>
 <manifest>
-<item id="nav" href="nav.xhtml"
- media-type="application/xhtml+xml" properties="nav"/>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
 ${manifest}
 <item id="css" href="style.css" media-type="text/css"/>
 </manifest>
 <spine>${spine}</spine>
-</package>`
-    );
+</package>`);
 
     status("正在打包 EPUB……");
     progress(75);
@@ -690,17 +633,12 @@ ${manifest}
       mimeType: "application/epub+zip",
       compression: "DEFLATE",
       compressionOptions: { level: 6 }
-    }, meta => {
-      progress(75 + meta.percent * 0.25);
-    });
+    }, meta => progress(75 + meta.percent * 0.25));
 
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-
     link.href = url;
-    link.download =
-      (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
-
+    link.download = (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -709,15 +647,9 @@ ${manifest}
 
     status("转换完成");
     progress(100);
-
-    say(
-      "转换完成！\n\n" +
-      report.join("\n") +
+    say("转换完成！\n\n" + report.join("\n") +
       `\n\n生成章节：${chapters.length}` +
-      `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB` +
-      "\n\n请检查正文、引号、段落及目录。"
-    );
-
+      `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB`);
   } catch (error) {
     console.error(error);
     status("转换失败");
