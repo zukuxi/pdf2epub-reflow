@@ -10,7 +10,7 @@
 body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:25px auto;padding:0 16px}
 h1{font-size:1.7em}
 section{border:1px solid #8886;border-radius:14px;padding:16px;margin:16px 0}
-input[type=text],input[type=file],input[type=number]{width:100%;box-sizing:border-box;padding:10px;margin:6px 0}
+input[type=text],input[type=file]{width:100%;box-sizing:border-box;padding:10px;margin:6px 0}
 button{padding:9px 14px;margin:4px;border:1px solid #8888;border-radius:8px;cursor:pointer}
 button:disabled{opacity:.45;cursor:default}
 .primary{background:#315bd6;color:white;border:0}
@@ -23,8 +23,8 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB3 二次检查</h1>
-<p class="muted">批量提取 PDF 文字、两轮识别段落、合并正文、识别章节并生成 EPUB 目录。所有文件均在浏览器本地处理。</p>
+<h1>PDF 批量转 EPUB 在第一次基础上检查2修复</h1>
+<p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
 <h2>1. 选择 PDF</h2>
@@ -40,10 +40,6 @@ progress{width:100%}
 <label><input id="keepFiles" type="checkbox" checked> 每份 PDF 保留独立章节</label>
 <label><input id="detect" type="checkbox" checked> 自动识别章节标题并生成目录</label>
 <label><input id="clean" type="checkbox" checked> 清理中文多余空格和英文断词</label>
-<label>第二轮重点检查的段落长度（字符数）
-<input id="threshold" type="number" min="100" max="10000" step="100" value="500">
-</label>
-<p class="muted">默认 500 字。超过阈值的段落会尝试使用原始 PDF 坐标重新分段。短段落保持第一轮结果不变。</p>
 <button id="start" class="primary" disabled>开始转换并下载 EPUB</button>
 </section>
 
@@ -158,7 +154,6 @@ function isSoundLine(s) {
   );
 }
 
-/* 清理文本：保留空行分段，普通换行合并为连续文字 */
 function cleanText(s) {
   if (!s) return "";
 
@@ -191,7 +186,7 @@ function cleanText(s) {
       pushCurrent();
       blocks.push(line.trim());
     } else {
-      current.push(line.trim());
+      current.push(line);
     }
   }
 
@@ -221,12 +216,7 @@ function cleanText(s) {
   }).filter(Boolean).join("\n\n").trim();
 }
 
-/*
- * PDF 第一轮 / 第二轮提取。
- * 第一轮沿用原有坐标和行距判断。
- * 第二轮只改变段落边界判断阈值，尽量发现第一轮漏掉的段落间隔。
- */
-function extractLines(items, pass = 1) {
+function extractLines(items) {
   const raw = [];
 
   for (const item of items) {
@@ -354,32 +344,13 @@ function extractLines(items, pass = 1) {
       const previous = nonEmpty[i - 1];
       const gap = Math.abs(previous.y - line.y);
 
-      let threshold;
-      let indentThreshold;
-
-      if (pass === 1) {
-        /* 原有第一轮判断，保持不变 */
-        threshold = Math.max(
-          typicalGap * 1.55,
-          (previous.height + line.height) * 0.95
-        );
-        indentThreshold = 10;
-      } else {
-        /*
-         * 第二轮更敏感：
-         * 较小的行距差也可能是段落间隔；
-         * 较轻微的左侧缩进也会被纳入判断。
-         */
-        threshold = Math.max(
-          typicalGap * 1.25,
-          (previous.height + line.height) * 0.78
-        );
-        indentThreshold = 6;
-      }
+      const threshold = Math.max(
+        typicalGap * 1.55,
+        (previous.height + line.height) * 0.95
+      );
 
       const verticalParagraphGap = gap > threshold;
-      const indentParagraphStart =
-        line.left > baseLeft + indentThreshold;
+      const indentParagraphStart = line.left > baseLeft + 10;
 
       if (verticalParagraphGap || indentParagraphStart) {
         output.push("");
@@ -392,148 +363,20 @@ function extractLines(items, pass = 1) {
   return output.join("\n");
 }
 
-/* 比较文本时忽略空白，不忽略标点和正文字符 */
-function normalizeForCompare(text) {
-  return String(text || "").replace(/\s+/g, "");
-}
-
-function splitParagraphs(text) {
-  return String(text || "")
-    .split(/\n\s*\n/)
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-/*
- * 第二轮修复：
- * 1. 第一轮只挑出超过阈值的段落。
- * 2. 将第二轮的段落按正文顺序重新组合，与第一轮段落核对。
- * 3. 只有完整匹配的长段落才使用第二轮分段。
- * 4. 短段落以及无法可靠匹配的段落保留第一轮结果。
- */
-function repairLongParagraphs(firstText, secondText, threshold) {
-  const firstParagraphs = splitParagraphs(firstText);
-  const secondParagraphs = splitParagraphs(secondText);
-
-  if (!firstParagraphs.length || !secondParagraphs.length) {
-    return {
-      text: firstText,
-      repaired: 0,
-      checked: 0
-    };
-  }
-
-  const secondNormalized = secondParagraphs.map(normalizeForCompare);
-  const result = [];
-  let cursor = 0;
-  let repaired = 0;
-  let checked = 0;
-
-  for (const firstParagraph of firstParagraphs) {
-    const target = normalizeForCompare(firstParagraph);
-
-    if (!target) continue;
-
-    const isLong = firstParagraph.length >= threshold;
-
-    if (isLong) checked++;
-
-    /*
-     * 从第二轮当前位置开始累加段落，
-     * 直到正文内容与第一轮当前段落完全一致。
-     */
-    let combined = "";
-    let matchedEnd = -1;
-
-    for (let j = cursor; j < secondParagraphs.length; j++) {
-      combined += secondNormalized[j];
-
-      if (combined === target) {
-        matchedEnd = j;
-        break;
-      }
-
-      if (combined.length >= target.length) {
-        break;
-      }
-
-      /*
-       * 如果累积文本已经不可能等于目标，
-       * 不再继续搜索。
-       */
-      if (!target.startsWith(combined)) {
-        break;
-      }
-    }
-
-    if (matchedEnd >= cursor) {
-      const candidates = secondParagraphs.slice(cursor, matchedEnd + 1);
-
-      if (isLong && candidates.length > 1) {
-        result.push(...candidates);
-        repaired++;
-      } else {
-        result.push(firstParagraph);
-      }
-
-      cursor = matchedEnd + 1;
-    } else {
-      /*
-       * 不能可靠对齐时不强行修改正文，
-       * 尽量向后寻找与当前段落对应的位置。
-       */
-      result.push(firstParagraph);
-
-      let consumed = 0;
-
-      while (
-        cursor < secondParagraphs.length &&
-        consumed < target.length
-      ) {
-        consumed += secondNormalized[cursor].length;
-        cursor++;
-
-        if (consumed >= target.length) break;
-      }
-    }
-  }
-
-  return {
-    text: result.join("\n\n"),
-    repaired,
-    checked
-  };
-}
-
-async function extractPDF(file, fileIndex, threshold) {
+async function extractPDF(file, fileIndex) {
   const pdf = await pdfjsLib.getDocument({
     data: await file.arrayBuffer()
   }).promise;
 
-  const firstPages = [];
-  const secondPages = [];
-
-  let repairedPages = 0;
-  let checkedParagraphs = 0;
-  let repairedParagraphs = 0;
+  const pages = [];
 
   for (let p = 1; p <= pdf.numPages; p++) {
-    status(
-      `正在提取 ${file.name}：第 ${p}/${pdf.numPages} 页（第一轮）`
-    );
+    status(`正在提取 ${file.name}：第 ${p}/${pdf.numPages} 页`);
 
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
 
-    /*
-     * 同一份原始 PDF 页面做两次分段。
-     * 不使用第一轮已经清理过的文本代替原始页面。
-     */
-    const firstRaw = extractLines(content.items, 1);
-    const secondRaw = extractLines(content.items, 2);
-
-    firstPages.push(cleanText(firstRaw));
-    secondPages.push(cleanText(secondRaw));
+    pages.push(extractLines(content.items));
 
     progress(60 * (fileIndex + p / pdf.numPages) / files.length);
 
@@ -542,41 +385,10 @@ async function extractPDF(file, fileIndex, threshold) {
     }
   }
 
-  /*
-   * 以页为单位进行比对，避免跨页文字对齐时
-   * 将前后不相关的段落误认为同一段。
-   */
-  const finalPages = [];
-
-  for (let i = 0; i < firstPages.length; i++) {
-    status(
-      `正在检查 ${file.name}：第 ${i + 1}/${firstPages.length} 页（第二轮）`
-    );
-
-    const repaired = repairLongParagraphs(
-      firstPages[i],
-      secondPages[i],
-      threshold
-    );
-
-    finalPages.push(repaired.text);
-    checkedParagraphs += repaired.checked;
-    repairedParagraphs += repaired.repaired;
-
-    if (repaired.repaired) repairedPages++;
-
-    if (i % 8 === 0) {
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
-  }
-
   return {
     name: file.name.replace(/\.pdf$/i, ""),
     pageCount: pdf.numPages,
-    text: finalPages.filter(Boolean).join("\n\n"),
-    checkedParagraphs,
-    repairedParagraphs,
-    repairedPages
+    text: cleanText(pages.join("\n"))
   };
 }
 
@@ -650,16 +462,355 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
-/* 将分好的段落生成 XHTML */
+/*
+ * 第二轮补救：
+ * 第一轮先按原有方式处理。
+ * 只有第一轮产生的异常长段落，才进入此函数。
+ * 这里允许不同类型的引号互相闭合，以应对 PDF 中引号字符不一致的情况。
+ */
+function repairLongParagraph(s) {
+  s = String(s || "").trim();
+
+  if (
+    s.length < 700 ||
+    /^\*+$/.test(s) ||
+    /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s)
+  ) {
+    return [s];
+  }
+
+  const result = [];
+  let buffer = "";
+  const quoteStack = [];
+
+  const openingQuotes = new Set(["“", "「", "『", "‘", "（", "【"]);
+  const closingQuotes = new Set(["”", "」", "』", "’", "）", "】"]);
+
+  function normalize(s) {
+    s = s.replace(/[ \t]+/g, " ").trim();
+
+    if ($("clean").checked) {
+      s = s.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+        "$1"
+      );
+      s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
+      s = s.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
+        "$1$2"
+      );
+      s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
+      s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
+    }
+
+    return s.trim();
+  }
+
+  function flush() {
+    const value = normalize(buffer);
+    if (value) result.push(value);
+    buffer = "";
+  }
+
+  function endsSentence(s) {
+    return /[。！？!?][”」』’"）】〉》]*$/.test(s.trim());
+  }
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const next = s[i + 1] || "";
+
+    if (ch === '"') {
+      buffer += ch;
+
+      // 容错：若已有未闭合的引号，则把英文双引号视为其闭引号。
+      if (quoteStack.length) {
+        quoteStack.pop();
+
+        if (quoteStack.length === 0 && endsSentence(buffer)) {
+          flush();
+        }
+      } else {
+        quoteStack.push('"');
+      }
+
+      continue;
+    }
+
+    if (openingQuotes.has(ch)) {
+      quoteStack.push(ch);
+      buffer += ch;
+      continue;
+    }
+
+    if (closingQuotes.has(ch)) {
+      buffer += ch;
+
+      // 不要求开闭引号字符必须完全匹配，避免引号不一致导致整段无法拆分。
+      if (quoteStack.length) {
+        quoteStack.pop();
+
+        if (quoteStack.length === 0 && endsSentence(buffer)) {
+          flush();
+        }
+      }
+
+      continue;
+    }
+
+    buffer += ch;
+
+    if (quoteStack.length) continue;
+
+    // 只在第二轮的异常长段落中启用句末分段。
+    if (/[。！？!?]/.test(ch)) {
+      flush();
+      continue;
+    }
+
+    // 对话结束后紧接叙述时，另起一段。
+    if (
+      /[”」』"’]/.test(ch) &&
+      /\s/.test(next) &&
+      next &&
+      !/^[“「『‘"]$/.test(s[i + 2] || "")
+    ) {
+      flush();
+    }
+  }
+
+  flush();
+
+  // 只有确实拆出了多个段落时才采用第二轮结果。
+  // 如果没有发现边界，则完整保留第一轮原段落。
+  return result.length > 1 ? result : [s];
+}
+
 function paragraphs(text) {
-  const blocks = splitParagraphs(text);
+  const source = String(text || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n");
 
-  return blocks.map(block => {
-    const content = escapeHTML(block)
-      .replace(/\n/g, " ");
+  const rawBlocks = source.split(/\n[ \t]*\n+/);
+  const output = [];
 
-    return "<p>" + content + "</p>";
-  }).join("\n");
+  const quotePairs = {
+    "“": "”",
+    "「": "」",
+    "『": "』",
+    "‘": "’"
+  };
+
+  const closingQuotes = new Set(["”", "」", "』", "’"]);
+  const endPunctuation = new Set(["。", "！", "？", "!", "?"]);
+
+  function normalize(s) {
+    s = s.replace(/[ \t]+/g, " ").trim();
+
+    if ($("clean").checked) {
+      s = s.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+        "$1"
+      );
+
+      s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
+
+      s = s.replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
+        "$1$2"
+      );
+
+      s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
+      s = s.replace(/[ \t]+([）】])/g, "$1");
+    }
+
+    return s.trim();
+  }
+
+  function isOpeningQuote(ch) {
+    return Object.prototype.hasOwnProperty.call(quotePairs, ch);
+  }
+
+  function isClosingQuote(ch) {
+    return closingQuotes.has(ch);
+  }
+
+  function isStar(s) {
+    return /^\*+$/.test(s.trim());
+  }
+
+  function isSound(s) {
+    return /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s.trim());
+  }
+
+  function updateQuoteState(s, stack) {
+    for (const ch of s) {
+      if (ch === '"') {
+        if (stack[stack.length - 1] === '"') stack.pop();
+        else stack.push('"');
+      } else if (isOpeningQuote(ch)) {
+        stack.push(quotePairs[ch]);
+      } else if (
+        isClosingQuote(ch) &&
+        stack[stack.length - 1] === ch
+      ) {
+        stack.pop();
+      }
+    }
+  }
+
+  // 第一轮逻辑：保留原有空白行及引号状态判断。
+  const mergedBlocks = [];
+  let pending = [];
+  const quoteState = [];
+
+  for (const block of rawBlocks) {
+    if (!block.trim()) continue;
+
+    const trimmed = block.trim();
+
+    if (isStar(trimmed) || isSound(trimmed)) {
+      if (pending.length) {
+        mergedBlocks.push(pending.join(" "));
+        pending = [];
+        quoteState.length = 0;
+      }
+
+      mergedBlocks.push(trimmed);
+      continue;
+    }
+
+    pending.push(trimmed);
+    updateQuoteState(block, quoteState);
+
+    if (quoteState.length === 0) {
+      mergedBlocks.push(pending.join(" "));
+      pending = [];
+    }
+  }
+
+  if (pending.length) {
+    mergedBlocks.push(pending.join(" "));
+  }
+
+  function splitParagraph(s) {
+    s = normalize(s);
+    if (!s) return [];
+
+    if (isStar(s) || isSound(s)) return [s];
+
+    const result = [];
+    let buffer = "";
+    const quoteStack = [];
+
+    function flush() {
+      const value = normalize(buffer);
+      if (value) result.push(value);
+      buffer = "";
+    }
+
+    function insideQuote() {
+      return quoteStack.length > 0;
+    }
+
+    function endsSentence(value) {
+      return /[。！？!?][”」』’"）】〉》]*$/.test(value.trim());
+    }
+
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      const prev = s[i - 1] || "";
+      const next = s[i + 1] || "";
+      const depthBefore = quoteStack.length;
+
+      if (ch === '"') {
+        if (quoteStack[quoteStack.length - 1] === '"') {
+          quoteStack.pop();
+          buffer += ch;
+
+          if (!insideQuote() && endsSentence(buffer)) {
+            flush();
+          }
+        } else {
+          quoteStack.push('"');
+          buffer += ch;
+        }
+        continue;
+      }
+
+      if (isOpeningQuote(ch)) {
+        quoteStack.push(quotePairs[ch]);
+        buffer += ch;
+        continue;
+      }
+
+      if (isClosingQuote(ch)) {
+        if (quoteStack[quoteStack.length - 1] === ch) {
+          quoteStack.pop();
+        }
+
+        buffer += ch;
+
+        if (
+          depthBefore > 0 &&
+          !insideQuote() &&
+          endsSentence(buffer)
+        ) {
+          flush();
+        }
+        continue;
+      }
+
+      buffer += ch;
+
+      if (insideQuote()) continue;
+
+      if (endPunctuation.has(ch)) {
+        flush();
+        continue;
+      }
+
+      if (
+        ch === " " &&
+        /[”」』"’]/.test(prev) &&
+        next &&
+        !/\s/.test(next) &&
+        !isOpeningQuote(next) &&
+        next !== '"'
+      ) {
+        flush();
+      }
+    }
+
+    flush();
+    return result;
+  }
+
+  // 第一轮结果保持不变；只对过长的单段运行第二轮补救。
+  const firstPass = [];
+
+  for (const block of mergedBlocks) {
+    firstPass.push(...splitParagraph(block));
+  }
+
+  const finalPass = [];
+
+  for (const paragraph of firstPass) {
+    if (
+      paragraph.length >= 700 &&
+      !isStar(paragraph) &&
+      !isSound(paragraph)
+    ) {
+      finalPass.push(...repairLongParagraph(paragraph));
+    } else {
+      finalPass.push(paragraph);
+    }
+  }
+
+  return finalPass
+    .filter(Boolean)
+    .map(p => "<p>" + escapeHTML(p) + "</p>")
+    .join("\n");
 }
 
 function xhtml(title, body) {
@@ -684,38 +835,24 @@ $("start").addEventListener("click", async () => {
     return;
   }
 
-  const thresholdInput = Number($("threshold").value);
-  const threshold = Number.isFinite(thresholdInput)
-    ? Math.min(10000, Math.max(100, thresholdInput))
-    : 500;
-
-  $("threshold").value = threshold;
   $("start").disabled = true;
   $("files").disabled = true;
-  $("progress").value = 0;
+  progress(0);
 
   try {
     const documents = [];
     const report = [];
 
     for (let i = 0; i < files.length; i++) {
-      const doc = await extractPDF(files[i], i, threshold);
+      const doc = await extractPDF(files[i], i);
       documents.push(doc);
 
       report.push(
         `${doc.name}: ${doc.pageCount} 页，${doc.text.length} 个字符`
       );
 
-      report.push(
-        `第二轮检查：${doc.checkedParagraphs} 个长段落，` +
-        `重新分段 ${doc.repairedParagraphs} 个，` +
-        `涉及 ${doc.repairedPages} 页`
-      );
-
       if (doc.text.length < 100) {
-        report.push(
-          "警告：提取文字很少，可能是扫描版或字体编码异常。"
-        );
+        report.push("警告：提取文字很少，可能是扫描版或字体编码异常。");
       }
     }
 
@@ -751,8 +888,7 @@ $("start").addEventListener("click", async () => {
 
       spine += `<itemref idref="${id}"/>`;
 
-      toc +=
-        `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
+      toc += `<li><a href="${href}">${escapeHTML(chapter.title)}</a></li>`;
 
       zip.file(
         `OEBPS/${href}`,
@@ -840,6 +976,7 @@ ${manifest}
     $("files").disabled = false;
   }
 });
+
 })();
 </script>
 </body>
