@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB二次继续修复</h1>
+<h1>PDF 批量转 EPUB 二次修复改改改h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -469,7 +469,7 @@ function makeChapters(documents) {
 function repairLongParagraph(paragraph, originalBlocks, splitParagraph) {
   if (
     paragraph.length < 700 ||
-    /^\\*+$/.test(paragraph.trim()) ||
+    /^\*+$/.test(paragraph.trim()) ||
     /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(paragraph.trim())
   ) {
     return [paragraph];
@@ -613,8 +613,8 @@ function paragraphs(text) {
   flushPending();
 
   /*
-   * 第一轮原有的句末分段逻辑。
-   * 不在第一轮增加按句号强制拆段的规则。
+   * 原有句末分段逻辑。
+   * 不增加按句号强制拆段的规则。
    */
   function splitParagraph(s) {
     s = normalize(s);
@@ -884,7 +884,7 @@ ${manifest}
 
     link.href = url;
     link.download =
-      (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
+      (title.replace(/[\\\/:*?"<>|]/g, "_") || "book") + ".epub";
 
     document.body.appendChild(link);
     link.click();
