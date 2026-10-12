@@ -23,8 +23,8 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 分段检查</h1>
-<p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
+<h1>非图片PDF批量转EPUB（修复换行）</h1>
+<p class="muted">换行修复，批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
 <h2>1. 选择 PDF</h2>
@@ -58,6 +58,10 @@ progress{width:100%}
 
 const $ = id => document.getElementById(id);
 let files = [];
+
+// 记录上一次自动生成的书名，区分自动填入和手动编辑。
+let lastAutoTitle = "";
+let titleManuallyEdited = false;
 
 if (window.pdfjsLib) {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -122,6 +126,7 @@ function renderFiles() {
           const target = i + delta;
           [files[i], files[target]] = [files[target], files[i]];
         }
+
         renderFiles();
       };
 
@@ -132,16 +137,40 @@ function renderFiles() {
   });
 
   $("start").disabled = false;
-
-  if (!$("title").value && files.length) {
-    $("title").value = files[0].name.replace(/\.pdf$/i, "");
-  }
 }
+
+// 用户手动编辑书名时，记住用户的选择。
+// 如果用户把书名改回自动生成的名字，则重新允许自动更新。
+$("title").addEventListener("input", () => {
+  titleManuallyEdited =
+    $("title").value.trim() !== lastAutoTitle;
+});
 
 $("files").addEventListener("change", event => {
   files = Array.from(event.target.files || []);
+
+  if (files.length) {
+    const titleInput = $("title");
+    const currentTitle = titleInput.value.trim();
+
+    const shouldAutoUpdate =
+      !currentTitle ||
+      (!titleManuallyEdited && currentTitle === lastAutoTitle);
+
+    if (shouldAutoUpdate) {
+      lastAutoTitle = files[0].name.replace(/\.pdf$/i, "");
+      titleInput.value = lastAutoTitle;
+      titleManuallyEdited = false;
+    }
+  }
+
   renderFiles();
-  say(files.length ? "文件已载入，可以开始转换。" : "请选择 PDF。");
+
+  say(
+    files.length
+      ? "文件已载入，可以开始转换。"
+      : "请选择 PDF。"
+  );
 });
 
 function isStarLine(s) {
@@ -442,6 +471,7 @@ function makeChapters(documents) {
             if (i === 0 && part.title === doc.name) {
               part.title = doc.name + " — 正文";
             }
+
             chapters.push(part);
           });
         } else {
@@ -462,14 +492,6 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
-/*
- * 段落拆分规则：
- * 1. 保留 PDF 提取出的空行段落边界。
- * 2. 一组引号闭合后，紧接着出现下一组引号时，另起一段。
- * 3. 兼容中文引号与英文双引号混用。
- * 4. 对话内部的句号不直接拆段；引号外的旁白按句末标点拆分。
- * 5. 超长且引号异常的文本提供兜底，避免整段无法拆分。
- */
 function paragraphs(text) {
   const source = String(text || "")
     .replace(/\u00a0/g, " ")
@@ -514,19 +536,11 @@ function paragraphs(text) {
     return s.trim();
   }
 
-  function isStar(s) {
-    return /^\*+$/.test(s.trim());
-  }
-
-  function isSound(s) {
-    return /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s.trim());
-  }
-
   function splitParagraph(input) {
     const s = normalize(input);
 
     if (!s) return [];
-    if (isStar(s) || isSound(s)) return [s];
+    if (isStarLine(s) || isSoundLine(s)) return [s];
 
     const result = [];
     const stack = [];
@@ -534,7 +548,6 @@ function paragraphs(text) {
 
     function flush() {
       const value = normalize(buffer);
-
       if (value) result.push(value);
       buffer = "";
     }
@@ -544,10 +557,7 @@ function paragraphs(text) {
     }
 
     function skipSpaces(index) {
-      while (index < s.length && /\s/.test(s[index])) {
-        index++;
-      }
-
+      while (index < s.length && /\s/.test(s[index])) index++;
       return index;
     }
 
@@ -558,7 +568,6 @@ function paragraphs(text) {
     for (let i = 0; i < s.length; i++) {
       const ch = s[i];
 
-      // 英文双引号：允许正常配对，也允许容错闭合中文对话引号。
       if (ch === '"') {
         if (stack[stack.length - 1] === '"') {
           stack.pop();
@@ -576,7 +585,6 @@ function paragraphs(text) {
             }
           }
         } else if (stack.length > 0 && isSentenceEndBefore()) {
-          // 例如中文左引号开头，却用英文双引号结束。
           stack.pop();
           buffer += ch;
 
@@ -592,10 +600,7 @@ function paragraphs(text) {
             }
           }
         } else {
-          // 新的英文引号对话开始前，先结束前面的正文。
-          if (stack.length === 0 && normalize(buffer)) {
-            flush();
-          }
+          if (stack.length === 0 && normalize(buffer)) flush();
 
           stack.push('"');
           buffer += ch;
@@ -605,10 +610,7 @@ function paragraphs(text) {
       }
 
       if (isOpen(ch)) {
-        // 上一段内容已经结束，现在出现新对话，另起一段。
-        if (stack.length === 0 && normalize(buffer)) {
-          flush();
-        }
+        if (stack.length === 0 && normalize(buffer)) flush();
 
         stack.push(quotePairs[ch]);
         buffer += ch;
@@ -616,7 +618,6 @@ function paragraphs(text) {
       }
 
       if (closeQuotes.has(ch)) {
-        // 兼容混用引号：中文右引号也可以关闭当前英文引号。
         if (
           stack[stack.length - 1] === ch ||
           stack[stack.length - 1] === '"'
@@ -624,10 +625,7 @@ function paragraphs(text) {
           stack.pop();
         } else {
           const matching = stack.lastIndexOf(ch);
-
-          if (matching >= 0) {
-            stack.length = matching;
-          }
+          if (matching >= 0) stack.length = matching;
         }
 
         buffer += ch;
@@ -635,7 +633,6 @@ function paragraphs(text) {
         if (stack.length === 0) {
           const next = skipSpaces(i + 1);
 
-          // 闭合引号后，若下一个非空白字符又是引号，拆成新段。
           if (
             next < s.length &&
             (isOpen(s[next]) || s[next] === '"')
@@ -650,13 +647,11 @@ function paragraphs(text) {
 
       buffer += ch;
 
-      // 引号外的旁白按句末标点分段。
       if (stack.length === 0 && endPunctuation.has(ch)) {
         flush();
         continue;
       }
 
-      // 兜底：异常长且引号未闭合时，避免后续正文全部粘连。
       if (
         stack.length > 0 &&
         buffer.length > 900 &&
