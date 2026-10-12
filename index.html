@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 二次修复改改改<h1>
+<h1>PDF 批量转 EPUB 超700字</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -462,43 +462,17 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
-/*
- * 第二轮只处理异常长段落。
- * 第一轮结果不会被全局重新拆分。
- */
-function repairLongParagraph(paragraph, originalBlocks, splitParagraph) {
-  if (
-    paragraph.length < 700 ||
-    /^\*+$/.test(paragraph.trim()) ||
-    /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(paragraph.trim())
-  ) {
-    return [paragraph];
-  }
-
-  // 只使用原文中确实存在的空行边界。
-  // 不按句号或逗号强制切开长段落。
-  const recovered = [];
-
-  for (const block of originalBlocks) {
-    const pieces = splitParagraph(block);
-    recovered.push(...pieces);
-  }
-
-  // 如果原始块成功恢复了更多段落，就用第二轮结果。
-  // 如果没有恢复出更多段落，保持第一轮原样。
-  if (recovered.length > 1) {
-    return recovered;
-  }
-
-  return [paragraph];
-}
-
 function paragraphs(text) {
   const source = String(text || "")
     .replace(/\u00a0/g, " ")
     .replace(/\r\n?/g, "\n");
 
-  const rawBlocks = source.split(/\n[ \t]*\n+/);
+  // 保留原文的空行边界，作为第二轮修复的依据。
+  const rawBlocks = source
+    .split(/\n[ \t]*\n+/)
+    .map(block => block.trim())
+    .filter(Boolean);
+
   const quotePairs = {
     "“": "”",
     "「": "」",
@@ -565,9 +539,8 @@ function paragraphs(text) {
   }
 
   /*
-   * 第一轮：原有合并逻辑。
-   * 同时记录每个合并块所对应的原始文本块，
-   * 让第二轮能够回到原来的空行边界。
+   * 第一轮：保持原来的合并逻辑。
+   * 每个合并块同时记录它来自哪些原始块。
    */
   const mergedBlocks = [];
   const mergedSources = [];
@@ -587,9 +560,8 @@ function paragraphs(text) {
   }
 
   for (const block of rawBlocks) {
-    if (!block.trim()) continue;
-
     const trimmed = block.trim();
+    if (!trimmed) continue;
 
     if (isStar(trimmed) || isSound(trimmed)) {
       flushPending();
@@ -613,8 +585,8 @@ function paragraphs(text) {
   flushPending();
 
   /*
-   * 原有句末分段逻辑。
-   * 不增加按句号强制拆段的规则。
+   * 原有句末分段函数。
+   * 第二轮仍然调用此函数，不额外按句号强行拆分。
    */
   function splitParagraph(s) {
     s = normalize(s);
@@ -709,33 +681,48 @@ function paragraphs(text) {
     return result;
   }
 
-  // 第一轮：对原来的合并块执行原有分段逻辑。
+  /*
+   * 第二轮修复：
+   * 1. 第一轮先正常运行。
+   * 2. 逐一检查第一轮产生的段落，而不是只看整个合并块。
+   * 3. 某个段落超过 700 字时，才回看对应的原始块。
+   * 4. 只有原文确实有多个空行分隔块，才尝试恢复边界。
+   * 5. 恢复结果确实比第一轮更细时才采用，否则保留原结果。
+   */
   const firstPass = [];
 
   for (let i = 0; i < mergedBlocks.length; i++) {
-    const block = mergedBlocks[i];
-    const firstResult = splitParagraph(block);
-    const sources = mergedSources[i] || [block];
+    const mergedText = mergedBlocks[i];
+    const sources = mergedSources[i] || [mergedText];
+    const firstResult = splitParagraph(mergedText);
 
     if (
-      block.length >= 700 &&
-      sources.length > 1 &&
-      !isStar(block) &&
-      !isSound(block)
+      isStar(mergedText) ||
+      isSound(mergedText) ||
+      sources.length <= 1
     ) {
-      // 第二轮只重新检查异常长块。
-      // 每个原始块独立运行原来的 splitParagraph。
-      const secondResult = repairLongParagraph(
-        firstResult.length === 1 ? firstResult[0] : block,
-        sources,
-        splitParagraph
-      );
+      firstPass.push(...firstResult);
+      continue;
+    }
 
-      if (firstResult.length === 1 && secondResult.length > 1) {
-        firstPass.push(...secondResult);
-      } else {
-        firstPass.push(...firstResult);
-      }
+    // 第一轮可能已分出多个段落，但仍然留下一个异常长段。
+    const hasLongParagraph = firstResult.some(
+      paragraph => paragraph.length > 700
+    );
+
+    if (!hasLongParagraph) {
+      firstPass.push(...firstResult);
+      continue;
+    }
+
+    // 原文块逐个分段，不能把所有原文再次拼起来处理。
+    const recovered = sources.flatMap(originalBlock =>
+      splitParagraph(originalBlock)
+    );
+
+    // 只有恢复出的段落数量比第一轮更多，才替换第一轮结果。
+    if (recovered.length > firstResult.length) {
+      firstPass.push(...recovered);
     } else {
       firstPass.push(...firstResult);
     }
