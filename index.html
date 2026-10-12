@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 修复第二次段落</h1>
+<h1>PDF 批量转 EPUB 分段检查</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -462,6 +462,14 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
+/*
+ * 段落拆分规则：
+ * 1. 保留 PDF 提取出的空行段落边界。
+ * 2. 一组引号闭合后，紧接着出现下一组引号时，另起一段。
+ * 3. 兼容中文引号与英文双引号混用。
+ * 4. 对话内部的句号不直接拆段；引号外的旁白按句末标点拆分。
+ * 5. 超长且引号异常的文本提供兜底，避免整段无法拆分。
+ */
 function paragraphs(text) {
   const source = String(text || "")
     .replace(/\u00a0/g, " ")
@@ -479,7 +487,8 @@ function paragraphs(text) {
     "‘": "’"
   };
 
-  const closingQuotes = new Set(["”", "」", "』", "’"]);
+  const openQuotes = new Set(Object.keys(quotePairs));
+  const closeQuotes = new Set(["”", "」", "』", "’"]);
   const endPunctuation = new Set(["。", "！", "？", "!", "?"]);
 
   function normalize(s) {
@@ -505,14 +514,6 @@ function paragraphs(text) {
     return s.trim();
   }
 
-  function isOpeningQuote(ch) {
-    return Object.prototype.hasOwnProperty.call(quotePairs, ch);
-  }
-
-  function isClosingQuote(ch) {
-    return closingQuotes.has(ch);
-  }
-
   function isStar(s) {
     return /^\*+$/.test(s.trim());
   }
@@ -521,172 +522,151 @@ function paragraphs(text) {
     return /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s.trim());
   }
 
-  function updateQuoteState(s, stack) {
-    for (let i = 0; i < s.length; i++) {
-      const ch = s[i];
+  function splitParagraph(input) {
+    const s = normalize(input);
 
-      if (ch === '"') {
-        if (stack[stack.length - 1] === '"') {
-          stack.pop();
-        } else if (
-          stack.length > 0 &&
-          /[。！？!?][）】〉》]*$/.test(s.slice(0, i).trim())
-        ) {
-          // 例如中文左引号“……。”后误用英文双引号闭合。
-          stack.pop();
-        } else {
-          stack.push('"');
-        }
-      } else if (isOpeningQuote(ch)) {
-        stack.push(quotePairs[ch]);
-      } else if (
-        isClosingQuote(ch) &&
-        stack[stack.length - 1] === ch
-      ) {
-        stack.pop();
-      }
-    }
-  }
-
-  const mergedBlocks = [];
-  const mergedSources = [];
-
-  let pending = [];
-  let pendingSources = [];
-  const quoteState = [];
-
-  function flushPending() {
-    if (!pending.length) return;
-
-    mergedBlocks.push(pending.join(" "));
-    mergedSources.push(pendingSources.slice());
-
-    pending = [];
-    pendingSources = [];
-  }
-
-  for (const block of rawBlocks) {
-    const trimmed = block.trim();
-    if (!trimmed) continue;
-
-    if (isStar(trimmed) || isSound(trimmed)) {
-      flushPending();
-      quoteState.length = 0;
-
-      mergedBlocks.push(trimmed);
-      mergedSources.push([trimmed]);
-      continue;
-    }
-
-    pending.push(trimmed);
-    pendingSources.push(trimmed);
-
-    updateQuoteState(block, quoteState);
-
-    if (quoteState.length === 0) {
-      flushPending();
-    }
-  }
-
-  flushPending();
-
-  function splitParagraph(s) {
-    s = normalize(s);
     if (!s) return [];
-
     if (isStar(s) || isSound(s)) return [s];
 
     const result = [];
+    const stack = [];
     let buffer = "";
-    const quoteStack = [];
 
     function flush() {
       const value = normalize(buffer);
+
       if (value) result.push(value);
       buffer = "";
     }
 
-    function insideQuote() {
-      return quoteStack.length > 0;
+    function isOpen(ch) {
+      return openQuotes.has(ch);
     }
 
-    function endsSentence(value) {
-      return /[。！？!?][”」』’"）】〉》]*$/.test(value.trim());
+    function skipSpaces(index) {
+      while (index < s.length && /\s/.test(s[index])) {
+        index++;
+      }
+
+      return index;
+    }
+
+    function isSentenceEndBefore() {
+      return /[。！？!?][）】〉》]*$/.test(buffer.trim());
     }
 
     for (let i = 0; i < s.length; i++) {
       const ch = s[i];
-      const prev = s[i - 1] || "";
-      const next = s[i + 1] || "";
-      const depthBefore = quoteStack.length;
 
+      // 英文双引号：允许正常配对，也允许容错闭合中文对话引号。
       if (ch === '"') {
-        if (quoteStack[quoteStack.length - 1] === '"') {
-          quoteStack.pop();
+        if (stack[stack.length - 1] === '"') {
+          stack.pop();
           buffer += ch;
 
-          if (!insideQuote() && endsSentence(buffer)) {
-            flush();
+          if (stack.length === 0) {
+            const next = skipSpaces(i + 1);
+
+            if (
+              next < s.length &&
+              (isOpen(s[next]) || s[next] === '"')
+            ) {
+              flush();
+              i = next - 1;
+            }
           }
-        } else if (
-          quoteStack.length > 0 &&
-          /[。！？!?][）】〉》]*$/.test(buffer.trim())
-        ) {
-          // 将句末的英文双引号视为中文引号的闭合符。
-          quoteStack.pop();
+        } else if (stack.length > 0 && isSentenceEndBefore()) {
+          // 例如中文左引号开头，却用英文双引号结束。
+          stack.pop();
           buffer += ch;
 
-          if (!insideQuote() && endsSentence(buffer)) {
-            flush();
+          if (stack.length === 0) {
+            const next = skipSpaces(i + 1);
+
+            if (
+              next < s.length &&
+              (isOpen(s[next]) || s[next] === '"')
+            ) {
+              flush();
+              i = next - 1;
+            }
           }
         } else {
-          quoteStack.push('"');
+          // 新的英文引号对话开始前，先结束前面的正文。
+          if (stack.length === 0 && normalize(buffer)) {
+            flush();
+          }
+
+          stack.push('"');
           buffer += ch;
         }
+
         continue;
       }
 
-      if (isOpeningQuote(ch)) {
-        quoteStack.push(quotePairs[ch]);
-        buffer += ch;
-        continue;
-      }
-
-      if (isClosingQuote(ch)) {
-        if (quoteStack[quoteStack.length - 1] === ch) {
-          quoteStack.pop();
-        }
-
-        buffer += ch;
-
-        if (
-          depthBefore > 0 &&
-          !insideQuote() &&
-          endsSentence(buffer)
-        ) {
+      if (isOpen(ch)) {
+        // 上一段内容已经结束，现在出现新对话，另起一段。
+        if (stack.length === 0 && normalize(buffer)) {
           flush();
         }
+
+        stack.push(quotePairs[ch]);
+        buffer += ch;
+        continue;
+      }
+
+      if (closeQuotes.has(ch)) {
+        // 兼容混用引号：中文右引号也可以关闭当前英文引号。
+        if (
+          stack[stack.length - 1] === ch ||
+          stack[stack.length - 1] === '"'
+        ) {
+          stack.pop();
+        } else {
+          const matching = stack.lastIndexOf(ch);
+
+          if (matching >= 0) {
+            stack.length = matching;
+          }
+        }
+
+        buffer += ch;
+
+        if (stack.length === 0) {
+          const next = skipSpaces(i + 1);
+
+          // 闭合引号后，若下一个非空白字符又是引号，拆成新段。
+          if (
+            next < s.length &&
+            (isOpen(s[next]) || s[next] === '"')
+          ) {
+            flush();
+            i = next - 1;
+          }
+        }
+
         continue;
       }
 
       buffer += ch;
 
-      if (insideQuote()) continue;
-
-      if (endPunctuation.has(ch)) {
+      // 引号外的旁白按句末标点分段。
+      if (stack.length === 0 && endPunctuation.has(ch)) {
         flush();
         continue;
       }
 
+      // 兜底：异常长且引号未闭合时，避免后续正文全部粘连。
       if (
-        ch === " " &&
-        /[”」』"’]/.test(prev) &&
-        next &&
-        !/\s/.test(next) &&
-        !isOpeningQuote(next) &&
-        next !== '"'
+        stack.length > 0 &&
+        buffer.length > 900 &&
+        endPunctuation.has(ch) &&
+        /[。！？!?]/.test(
+          s.slice(i + 1, Math.min(s.length, i + 90))
+        )
       ) {
         flush();
+        stack.length = 0;
       }
     }
 
@@ -694,39 +674,13 @@ function paragraphs(text) {
     return result;
   }
 
-  const firstPass = [];
+  const output = [];
 
-  for (let i = 0; i < mergedBlocks.length; i++) {
-    const mergedText = mergedBlocks[i];
-    const sources = mergedSources[i] || [mergedText];
-    const firstResult = splitParagraph(mergedText);
-
-    if (isStar(mergedText) || isSound(mergedText)) {
-      firstPass.push(...firstResult);
-      continue;
-    }
-
-    const hasLongParagraph = firstResult.some(
-      paragraph => paragraph.length > 200
-    );
-
-    if (!hasLongParagraph) {
-      firstPass.push(...firstResult);
-      continue;
-    }
-
-    const recovered = sources.flatMap(originalBlock =>
-      splitParagraph(originalBlock)
-    );
-
-    if (recovered.length > firstResult.length) {
-      firstPass.push(...recovered);
-    } else {
-      firstPass.push(...firstResult);
-    }
+  for (const block of rawBlocks) {
+    output.push(...splitParagraph(block));
   }
 
-  return firstPass
+  return output
     .filter(Boolean)
     .map(p => "<p>" + escapeHTML(p) + "</p>")
     .join("\n");
