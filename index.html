@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 200n</h1>
+<h1>PDF 批量转 EPUB 修复第二次段落</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -467,7 +467,6 @@ function paragraphs(text) {
     .replace(/\u00a0/g, " ")
     .replace(/\r\n?/g, "\n");
 
-  // 保留原文的空行边界，作为第二轮修复的依据。
   const rawBlocks = source
     .split(/\n[ \t]*\n+/)
     .map(block => block.trim())
@@ -523,10 +522,21 @@ function paragraphs(text) {
   }
 
   function updateQuoteState(s, stack) {
-    for (const ch of s) {
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+
       if (ch === '"') {
-        if (stack[stack.length - 1] === '"') stack.pop();
-        else stack.push('"');
+        if (stack[stack.length - 1] === '"') {
+          stack.pop();
+        } else if (
+          stack.length > 0 &&
+          /[。！？!?][）】〉》]*$/.test(s.slice(0, i).trim())
+        ) {
+          // 例如中文左引号“……。”后误用英文双引号闭合。
+          stack.pop();
+        } else {
+          stack.push('"');
+        }
       } else if (isOpeningQuote(ch)) {
         stack.push(quotePairs[ch]);
       } else if (
@@ -538,10 +548,6 @@ function paragraphs(text) {
     }
   }
 
-  /*
-   * 第一轮：保持原来的合并逻辑。
-   * 每个合并块同时记录它来自哪些原始块。
-   */
   const mergedBlocks = [];
   const mergedSources = [];
 
@@ -584,10 +590,6 @@ function paragraphs(text) {
 
   flushPending();
 
-  /*
-   * 原有句末分段函数。
-   * 第二轮仍然调用此函数，不额外按句号强行拆分。
-   */
   function splitParagraph(s) {
     s = normalize(s);
     if (!s) return [];
@@ -620,6 +622,17 @@ function paragraphs(text) {
 
       if (ch === '"') {
         if (quoteStack[quoteStack.length - 1] === '"') {
+          quoteStack.pop();
+          buffer += ch;
+
+          if (!insideQuote() && endsSentence(buffer)) {
+            flush();
+          }
+        } else if (
+          quoteStack.length > 0 &&
+          /[。！？!?][）】〉》]*$/.test(buffer.trim())
+        ) {
+          // 将句末的英文双引号视为中文引号的闭合符。
           quoteStack.pop();
           buffer += ch;
 
@@ -681,14 +694,6 @@ function paragraphs(text) {
     return result;
   }
 
-  /*
-   * 第二轮修复：
-   * 1. 第一轮先正常运行。
-   * 2. 逐一检查第一轮产生的段落，而不是只看整个合并块。
-   * 3. 某个段落超过 200 字时，才回看对应的原始块。
-   * 4. 只有原文确实有多个空行分隔块，才尝试恢复边界。
-   * 5. 恢复结果确实比第一轮更细时才采用，否则保留原结果。
-   */
   const firstPass = [];
 
   for (let i = 0; i < mergedBlocks.length; i++) {
@@ -696,16 +701,11 @@ function paragraphs(text) {
     const sources = mergedSources[i] || [mergedText];
     const firstResult = splitParagraph(mergedText);
 
-    if (
-      isStar(mergedText) ||
-      isSound(mergedText) ||
-      sources.length <= 1
-    ) {
+    if (isStar(mergedText) || isSound(mergedText)) {
       firstPass.push(...firstResult);
       continue;
     }
 
-    // 第一轮可能已分出多个段落，但仍然留下一个异常长段。
     const hasLongParagraph = firstResult.some(
       paragraph => paragraph.length > 200
     );
@@ -715,12 +715,10 @@ function paragraphs(text) {
       continue;
     }
 
-    // 原文块逐个分段，不能把所有原文再次拼起来处理。
     const recovered = sources.flatMap(originalBlock =>
       splitParagraph(originalBlock)
     );
 
-    // 只有恢复出的段落数量比第一轮更多，才替换第一轮结果。
     if (recovered.length > firstResult.length) {
       firstPass.push(...recovered);
     } else {
@@ -871,7 +869,7 @@ ${manifest}
 
     link.href = url;
     link.download =
-      (title.replace(/[\\\/:*?"<>|]/g, "_") || "book") + ".epub";
+      (title.replace(/[\\/:*?"<>|]/g, "_") || "book") + ".epub";
 
     document.body.appendChild(link);
     link.click();
