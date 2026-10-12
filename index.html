@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB1</h1>
+<h1>PDF 批量转 EPUB2</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -64,9 +64,17 @@ if (window.pdfjsLib) {
     "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 }
 
-function say(message) { $("log").textContent = message; }
-function status(message) { $("status").textContent = message; }
-function progress(value) { $("progress").value = value; }
+function say(message) {
+  $("log").textContent = message;
+}
+
+function status(message) {
+  $("status").textContent = message;
+}
+
+function progress(value) {
+  $("progress").value = value;
+}
 
 function escapeHTML(s) {
   return String(s)
@@ -136,13 +144,16 @@ $("files").addEventListener("change", event => {
   say(files.length ? "文件已载入，可以开始转换。" : "请选择 PDF。");
 });
 
-/*
- * 文本清理规则：
- * 1. 普通单换行属于 PDF 自动折行，应合并。
- * 2. 空白行是段落边界。
- * 3. 独立星号和拟声词单独成段。
- * 4. 跨页文字不应被强制拆成两个段落。
- */
+function isStarLine(s) {
+  return /^\*+$/.test(String(s || "").trim());
+}
+
+function isSoundLine(s) {
+  return /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(
+    String(s || "").trim()
+  );
+}
+
 function cleanText(s) {
   if (!s) return "";
 
@@ -158,11 +169,6 @@ function cleanText(s) {
   const blocks = [];
   let current = [];
 
-  const isStar = line => /^\*+$/.test(line.trim());
-
-  const isSound = line =>
-    /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(line.trim());
-
   function pushCurrent() {
     if (current.length) {
       blocks.push(current.join(" "));
@@ -176,7 +182,7 @@ function cleanText(s) {
       continue;
     }
 
-    if (isStar(line) || isSound(line)) {
+    if (isStarLine(line) || isSoundLine(line)) {
       pushCurrent();
       blocks.push(line.trim());
     } else {
@@ -315,13 +321,10 @@ function extractLines(items) {
     ? gaps[Math.floor((gaps.length - 1) * 0.35)]
     : 0;
 
-  if (!typicalGap) typicalGap = nonEmpty[0].height * 1.2 || 12;
+  if (!typicalGap) {
+    typicalGap = nonEmpty[0].height * 1.2 || 12;
+  }
 
-  /*
-   * 识别段首缩进：
-   * 只用垂直间距可能漏掉段落边界；
-   * 明显的左侧缩进也可能代表新段落。
-   */
   const leftEdges = nonEmpty
     .map(line => Math.min(...line.items.map(item => item.x)))
     .filter(Number.isFinite)
@@ -385,8 +388,7 @@ async function extractPDF(file, fileIndex) {
   return {
     name: file.name.replace(/\.pdf$/i, ""),
     pageCount: pdf.numPages,
-
-    // 页面间不强制插入空白段，避免“因 / 为”被拆开。
+    // 页面边界不自动制造段落，避免跨页文字被拆开。
     text: cleanText(pages.join("\n"))
   };
 }
@@ -461,6 +463,15 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
+/*
+ * 段落处理：
+ * - 保留已有空白行段落边界。
+ * - 普通单换行默认视为自动折行。
+ * - 在完整句子的标点处适当分段，避免长段落连在一起。
+ * - 对话内部不按句末标点拆开。
+ * - 完整对话优先独立成段。
+ * - 独立星号和拟声词保持独立。
+ */
 function paragraphs(text) {
   const source = String(text || "")
     .replace(/\u00a0/g, " ")
@@ -476,6 +487,7 @@ function paragraphs(text) {
     "‘": "’"
   };
 
+  const closingQuotes = new Set(["”", "」", "』", "’"]);
   const endPunctuation = new Set(["。", "！", "？", "!", "?"]);
 
   function normalize(s) {
@@ -501,6 +513,14 @@ function paragraphs(text) {
     return s.trim();
   }
 
+  function isOpeningQuote(ch) {
+    return Object.prototype.hasOwnProperty.call(quotePairs, ch);
+  }
+
+  function isClosingQuote(ch) {
+    return closingQuotes.has(ch);
+  }
+
   function isStar(s) {
     return /^\*+$/.test(s.trim());
   }
@@ -514,10 +534,10 @@ function paragraphs(text) {
       if (ch === '"') {
         if (stack[stack.length - 1] === '"') stack.pop();
         else stack.push('"');
-      } else if (quotePairs[ch]) {
+      } else if (isOpeningQuote(ch)) {
         stack.push(quotePairs[ch]);
       } else if (
-        ["”", "」", "』", "’"].includes(ch) &&
+        isClosingQuote(ch) &&
         stack[stack.length - 1] === ch
       ) {
         stack.pop();
@@ -525,10 +545,7 @@ function paragraphs(text) {
     }
   }
 
-  /*
-   * 只有引号未闭合时才跨空白行合并。
-   * 其余空白行继续作为段落边界，避免整页正文粘成一大段。
-   */
+  // 只有引号未闭合时才跨空白行合并。
   const mergedBlocks = [];
   let pending = [];
   const quoteState = [];
@@ -536,7 +553,6 @@ function paragraphs(text) {
   for (const block of rawBlocks) {
     if (!block.trim()) continue;
 
-    // 星号和拟声词不应被吸进前一个未结束的普通段落。
     const trimmed = block.trim();
 
     if (isStar(trimmed) || isSound(trimmed)) {
@@ -545,6 +561,7 @@ function paragraphs(text) {
         pending = [];
         quoteState.length = 0;
       }
+
       mergedBlocks.push(trimmed);
       continue;
     }
@@ -607,20 +624,19 @@ function paragraphs(text) {
         continue;
       }
 
-      if (quotePairs[ch]) {
+      if (isOpeningQuote(ch)) {
         quoteStack.push(quotePairs[ch]);
         buffer += ch;
         continue;
       }
 
-      if (["”", "」", "』", "’"].includes(ch)) {
+      if (isClosingQuote(ch)) {
         if (quoteStack[quoteStack.length - 1] === ch) {
           quoteStack.pop();
         }
 
         buffer += ch;
 
-        // “……”闭合时，如果是完整句子，整个对话独立成段。
         if (
           depthBefore > 0 &&
           !insideQuote() &&
@@ -633,21 +649,22 @@ function paragraphs(text) {
 
       buffer += ch;
 
-      // 引号内部的句号不能拆开对话。
+      // 不在对话引号内部拆分。
       if (insideQuote()) continue;
 
+      // 句末标点处拆分，防止长段落粘连。
       if (endPunctuation.has(ch)) {
         flush();
         continue;
       }
 
-      // 闭引号后若接叙述，另起段。
+      // 闭引号后接叙述时另起一段。
       if (
         ch === " " &&
         /[”」』"’]/.test(prev) &&
         next &&
         !/\s/.test(next) &&
-        !quotePairs[next] &&
+        !isOpeningQuote(next) &&
         next !== '"'
       ) {
         flush();
