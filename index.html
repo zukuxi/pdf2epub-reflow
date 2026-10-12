@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 在第一次基础上检查2修复</h1>
+<h1>PDF 批量转 EPUB二次继续修复</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -463,127 +463,34 @@ function makeChapters(documents) {
 }
 
 /*
- * 第二轮补救：
- * 第一轮先按原有方式处理。
- * 只有第一轮产生的异常长段落，才进入此函数。
- * 这里允许不同类型的引号互相闭合，以应对 PDF 中引号字符不一致的情况。
+ * 第二轮只处理异常长段落。
+ * 第一轮结果不会被全局重新拆分。
  */
-function repairLongParagraph(s) {
-  s = String(s || "").trim();
-
+function repairLongParagraph(paragraph, originalBlocks, splitParagraph) {
   if (
-    s.length < 700 ||
-    /^\*+$/.test(s) ||
-    /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s)
+    paragraph.length < 700 ||
+    /^\\*+$/.test(paragraph.trim()) ||
+    /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(paragraph.trim())
   ) {
-    return [s];
+    return [paragraph];
   }
 
-  const result = [];
-  let buffer = "";
-  const quoteStack = [];
+  // 只使用原文中确实存在的空行边界。
+  // 不按句号或逗号强制切开长段落。
+  const recovered = [];
 
-  const openingQuotes = new Set(["“", "「", "『", "‘", "（", "【"]);
-  const closingQuotes = new Set(["”", "」", "』", "’", "）", "】"]);
-
-  function normalize(s) {
-    s = s.replace(/[ \t]+/g, " ").trim();
-
-    if ($("clean").checked) {
-      s = s.replace(
-        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
-        "$1"
-      );
-      s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
-      s = s.replace(
-        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
-        "$1$2"
-      );
-      s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
-      s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
-    }
-
-    return s.trim();
+  for (const block of originalBlocks) {
+    const pieces = splitParagraph(block);
+    recovered.push(...pieces);
   }
 
-  function flush() {
-    const value = normalize(buffer);
-    if (value) result.push(value);
-    buffer = "";
+  // 如果原始块成功恢复了更多段落，就用第二轮结果。
+  // 如果没有恢复出更多段落，保持第一轮原样。
+  if (recovered.length > 1) {
+    return recovered;
   }
 
-  function endsSentence(s) {
-    return /[。！？!?][”」』’"）】〉》]*$/.test(s.trim());
-  }
-
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    const next = s[i + 1] || "";
-
-    if (ch === '"') {
-      buffer += ch;
-
-      // 容错：若已有未闭合的引号，则把英文双引号视为其闭引号。
-      if (quoteStack.length) {
-        quoteStack.pop();
-
-        if (quoteStack.length === 0 && endsSentence(buffer)) {
-          flush();
-        }
-      } else {
-        quoteStack.push('"');
-      }
-
-      continue;
-    }
-
-    if (openingQuotes.has(ch)) {
-      quoteStack.push(ch);
-      buffer += ch;
-      continue;
-    }
-
-    if (closingQuotes.has(ch)) {
-      buffer += ch;
-
-      // 不要求开闭引号字符必须完全匹配，避免引号不一致导致整段无法拆分。
-      if (quoteStack.length) {
-        quoteStack.pop();
-
-        if (quoteStack.length === 0 && endsSentence(buffer)) {
-          flush();
-        }
-      }
-
-      continue;
-    }
-
-    buffer += ch;
-
-    if (quoteStack.length) continue;
-
-    // 只在第二轮的异常长段落中启用句末分段。
-    if (/[。！？!?]/.test(ch)) {
-      flush();
-      continue;
-    }
-
-    // 对话结束后紧接叙述时，另起一段。
-    if (
-      /[”」』"’]/.test(ch) &&
-      /\s/.test(next) &&
-      next &&
-      !/^[“「『‘"]$/.test(s[i + 2] || "")
-    ) {
-      flush();
-    }
-  }
-
-  flush();
-
-  // 只有确实拆出了多个段落时才采用第二轮结果。
-  // 如果没有发现边界，则完整保留第一轮原段落。
-  return result.length > 1 ? result : [s];
+  return [paragraph];
 }
 
 function paragraphs(text) {
@@ -592,8 +499,6 @@ function paragraphs(text) {
     .replace(/\r\n?/g, "\n");
 
   const rawBlocks = source.split(/\n[ \t]*\n+/);
-  const output = [];
-
   const quotePairs = {
     "“": "”",
     "「": "」",
@@ -621,7 +526,7 @@ function paragraphs(text) {
       );
 
       s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
-      s = s.replace(/[ \t]+([）】])/g, "$1");
+      s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
     }
 
     return s.trim();
@@ -659,10 +564,27 @@ function paragraphs(text) {
     }
   }
 
-  // 第一轮逻辑：保留原有空白行及引号状态判断。
+  /*
+   * 第一轮：原有合并逻辑。
+   * 同时记录每个合并块所对应的原始文本块，
+   * 让第二轮能够回到原来的空行边界。
+   */
   const mergedBlocks = [];
+  const mergedSources = [];
+
   let pending = [];
+  let pendingSources = [];
   const quoteState = [];
+
+  function flushPending() {
+    if (!pending.length) return;
+
+    mergedBlocks.push(pending.join(" "));
+    mergedSources.push(pendingSources.slice());
+
+    pending = [];
+    pendingSources = [];
+  }
 
   for (const block of rawBlocks) {
     if (!block.trim()) continue;
@@ -670,29 +592,30 @@ function paragraphs(text) {
     const trimmed = block.trim();
 
     if (isStar(trimmed) || isSound(trimmed)) {
-      if (pending.length) {
-        mergedBlocks.push(pending.join(" "));
-        pending = [];
-        quoteState.length = 0;
-      }
+      flushPending();
+      quoteState.length = 0;
 
       mergedBlocks.push(trimmed);
+      mergedSources.push([trimmed]);
       continue;
     }
 
     pending.push(trimmed);
+    pendingSources.push(trimmed);
+
     updateQuoteState(block, quoteState);
 
     if (quoteState.length === 0) {
-      mergedBlocks.push(pending.join(" "));
-      pending = [];
+      flushPending();
     }
   }
 
-  if (pending.length) {
-    mergedBlocks.push(pending.join(" "));
-  }
+  flushPending();
 
+  /*
+   * 第一轮原有的句末分段逻辑。
+   * 不在第一轮增加按句号强制拆段的规则。
+   */
   function splitParagraph(s) {
     s = normalize(s);
     if (!s) return [];
@@ -786,28 +709,39 @@ function paragraphs(text) {
     return result;
   }
 
-  // 第一轮结果保持不变；只对过长的单段运行第二轮补救。
+  // 第一轮：对原来的合并块执行原有分段逻辑。
   const firstPass = [];
 
-  for (const block of mergedBlocks) {
-    firstPass.push(...splitParagraph(block));
-  }
+  for (let i = 0; i < mergedBlocks.length; i++) {
+    const block = mergedBlocks[i];
+    const firstResult = splitParagraph(block);
+    const sources = mergedSources[i] || [block];
 
-  const finalPass = [];
-
-  for (const paragraph of firstPass) {
     if (
-      paragraph.length >= 700 &&
-      !isStar(paragraph) &&
-      !isSound(paragraph)
+      block.length >= 700 &&
+      sources.length > 1 &&
+      !isStar(block) &&
+      !isSound(block)
     ) {
-      finalPass.push(...repairLongParagraph(paragraph));
+      // 第二轮只重新检查异常长块。
+      // 每个原始块独立运行原来的 splitParagraph。
+      const secondResult = repairLongParagraph(
+        firstResult.length === 1 ? firstResult[0] : block,
+        sources,
+        splitParagraph
+      );
+
+      if (firstResult.length === 1 && secondResult.length > 1) {
+        firstPass.push(...secondResult);
+      } else {
+        firstPass.push(...firstResult);
+      }
     } else {
-      finalPass.push(paragraph);
+      firstPass.push(...firstResult);
     }
   }
 
-  return finalPass
+  return firstPass
     .filter(Boolean)
     .map(p => "<p>" + escapeHTML(p) + "</p>")
     .join("\n");
