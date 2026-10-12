@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 超200字</h1>
+<h1>PDF 批量转 EPUB 200n</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -707,7 +707,8 @@ function paragraphs(text) {
 
     // 第一轮可能已分出多个段落，但仍然留下一个异常长段。
     const hasLongParagraph = firstResult.some(
-      
+      paragraph => paragraph.length > 200
+    );
 
     if (!hasLongParagraph) {
       firstPass.push(...firstResult);
