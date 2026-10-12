@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB</h1>
+<h1>PDF 批量转 EPUB1</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -64,17 +64,9 @@ if (window.pdfjsLib) {
     "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 }
 
-function say(message) {
-  $("log").textContent = message;
-}
-
-function status(message) {
-  $("status").textContent = message;
-}
-
-function progress(value) {
-  $("progress").value = value;
-}
+function say(message) { $("log").textContent = message; }
+function status(message) { $("status").textContent = message; }
+function progress(value) { $("progress").value = value; }
 
 function escapeHTML(s) {
   return String(s)
@@ -144,12 +136,20 @@ $("files").addEventListener("change", event => {
   say(files.length ? "文件已载入，可以开始转换。" : "请选择 PDF。");
 });
 
+/*
+ * 文本清理规则：
+ * 1. 普通单换行属于 PDF 自动折行，应合并。
+ * 2. 空白行是段落边界。
+ * 3. 独立星号和拟声词单独成段。
+ * 4. 跨页文字不应被强制拆成两个段落。
+ */
 function cleanText(s) {
   if (!s) return "";
 
-  s = s.replace(/\u00a0/g, " ")
-       .replace(/\r\n?/g, "\n")
-       .replace(/([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g, "$1$2");
+  s = String(s)
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g, "$1$2");
 
   const lines = s.split("\n").map(line =>
     line.replace(/[ \t]+/g, " ").trim()
@@ -158,21 +158,36 @@ function cleanText(s) {
   const blocks = [];
   let current = [];
 
+  const isStar = line => /^\*+$/.test(line.trim());
+
+  const isSound = line =>
+    /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(line.trim());
+
+  function pushCurrent() {
+    if (current.length) {
+      blocks.push(current.join(" "));
+      current = [];
+    }
+  }
+
   for (const line of lines) {
     if (!line) {
-      if (current.length) {
-        blocks.push(current);
-        current = [];
-      }
+      pushCurrent();
+      continue;
+    }
+
+    if (isStar(line) || isSound(line)) {
+      pushCurrent();
+      blocks.push(line.trim());
     } else {
       current.push(line);
     }
   }
 
-  if (current.length) blocks.push(current);
+  pushCurrent();
 
   return blocks.map(block => {
-    let result = block.join(" ");
+    let result = block;
 
     if ($("clean").checked) {
       result = result.replace(
@@ -302,20 +317,41 @@ function extractLines(items) {
 
   if (!typicalGap) typicalGap = nonEmpty[0].height * 1.2 || 12;
 
+  /*
+   * 识别段首缩进：
+   * 只用垂直间距可能漏掉段落边界；
+   * 明显的左侧缩进也可能代表新段落。
+   */
+  const leftEdges = nonEmpty
+    .map(line => Math.min(...line.items.map(item => item.x)))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+
+  const baseLeft = leftEdges.length
+    ? leftEdges[Math.floor((leftEdges.length - 1) * 0.2)]
+    : 0;
+
   const output = [];
 
   for (let i = 0; i < nonEmpty.length; i++) {
     const line = nonEmpty[i];
+    line.left = Math.min(...line.items.map(item => item.x));
 
     if (i > 0) {
       const previous = nonEmpty[i - 1];
       const gap = Math.abs(previous.y - line.y);
+
       const threshold = Math.max(
         typicalGap * 1.55,
         (previous.height + line.height) * 0.95
       );
 
-      if (gap > threshold) output.push("");
+      const verticalParagraphGap = gap > threshold;
+      const indentParagraphStart = line.left > baseLeft + 10;
+
+      if (verticalParagraphGap || indentParagraphStart) {
+        output.push("");
+      }
     }
 
     output.push(line.text);
@@ -349,7 +385,9 @@ async function extractPDF(file, fileIndex) {
   return {
     name: file.name.replace(/\.pdf$/i, ""),
     pageCount: pdf.numPages,
-    text: cleanText(pages.join("\n\n"))
+
+    // 页面间不强制插入空白段，避免“因 / 为”被拆开。
+    text: cleanText(pages.join("\n"))
   };
 }
 
@@ -423,15 +461,6 @@ function makeChapters(documents) {
   return chapters.filter(ch => ch.text.trim());
 }
 
-/*
- * 段落处理：
- * - 普通单换行视为自动折行。
- * - 空白行一般保留为段落边界。
- * - 若引号尚未闭合，则跨空白行继续合并。
- * - 中文及英文双引号内部不按句末标点切段。
- * - 闭引号后的叙述、下一句对话分别成段。
- * - 独立星号与常见拟声词单独成段。
- */
 function paragraphs(text) {
   const source = String(text || "")
     .replace(/\u00a0/g, " ")
@@ -472,49 +501,58 @@ function paragraphs(text) {
     return s.trim();
   }
 
-  // 跨空白行跟踪引号状态。
-  // 引号没闭合时，后续块仍属于同一段引文。
+  function isStar(s) {
+    return /^\*+$/.test(s.trim());
+  }
+
+  function isSound(s) {
+    return /^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s.trim());
+  }
+
   function updateQuoteState(s, stack) {
-    for (let i = 0; i < s.length; i++) {
-      const ch = s[i];
-
+    for (const ch of s) {
       if (ch === '"') {
-        if (stack[stack.length - 1] === '"') {
-          stack.pop();
-        } else {
-          stack.push('"');
-        }
-        continue;
-      }
-
-      if (quotePairs[ch]) {
+        if (stack[stack.length - 1] === '"') stack.pop();
+        else stack.push('"');
+      } else if (quotePairs[ch]) {
         stack.push(quotePairs[ch]);
-        continue;
-      }
-
-      if (
-        ch === "”" || ch === "」" ||
-        ch === "』" || ch === "’"
+      } else if (
+        ["”", "」", "』", "’"].includes(ch) &&
+        stack[stack.length - 1] === ch
       ) {
-        if (stack[stack.length - 1] === ch) {
-          stack.pop();
-        }
+        stack.pop();
       }
     }
   }
 
-  // 将跨行、跨空白行但引号仍未闭合的内容合并。
+  /*
+   * 只有引号未闭合时才跨空白行合并。
+   * 其余空白行继续作为段落边界，避免整页正文粘成一大段。
+   */
   const mergedBlocks = [];
   let pending = [];
-  const state = [];
+  const quoteState = [];
 
   for (const block of rawBlocks) {
     if (!block.trim()) continue;
 
-    pending.push(block.trim());
-    updateQuoteState(block, state);
+    // 星号和拟声词不应被吸进前一个未结束的普通段落。
+    const trimmed = block.trim();
 
-    if (state.length === 0) {
+    if (isStar(trimmed) || isSound(trimmed)) {
+      if (pending.length) {
+        mergedBlocks.push(pending.join(" "));
+        pending = [];
+        quoteState.length = 0;
+      }
+      mergedBlocks.push(trimmed);
+      continue;
+    }
+
+    pending.push(trimmed);
+    updateQuoteState(block, quoteState);
+
+    if (quoteState.length === 0) {
       mergedBlocks.push(pending.join(" "));
       pending = [];
     }
@@ -528,11 +566,7 @@ function paragraphs(text) {
     s = normalize(s);
     if (!s) return [];
 
-    if (/^\*+$/.test(s)) return [s];
-
-    if (/^[\u3400-\u9fff]{1,8}[—–\-…]+$/.test(s)) {
-      return [s];
-    }
+    if (isStar(s) || isSound(s)) return [s];
 
     const result = [];
     let buffer = "";
@@ -544,7 +578,7 @@ function paragraphs(text) {
       buffer = "";
     }
 
-    function isInsideQuote() {
+    function insideQuote() {
       return quoteStack.length > 0;
     }
 
@@ -556,68 +590,58 @@ function paragraphs(text) {
       const ch = s[i];
       const prev = s[i - 1] || "";
       const next = s[i + 1] || "";
-      const previousDepth = quoteStack.length;
+      const depthBefore = quoteStack.length;
 
-      // 英文双引号：同一个字符既可开引号，也可闭引号。
       if (ch === '"') {
         if (quoteStack[quoteStack.length - 1] === '"') {
           quoteStack.pop();
           buffer += ch;
 
-          if (!isInsideQuote() && endsSentence(buffer)) {
+          if (!insideQuote() && endsSentence(buffer)) {
             flush();
           }
         } else {
           quoteStack.push('"');
           buffer += ch;
         }
-
         continue;
       }
 
-      // 中文开引号
       if (quotePairs[ch]) {
         quoteStack.push(quotePairs[ch]);
         buffer += ch;
         continue;
       }
 
-      // 中文闭引号
-      if (
-        ch === "”" || ch === "」" ||
-        ch === "』" || ch === "’"
-      ) {
+      if (["”", "」", "』", "’"].includes(ch)) {
         if (quoteStack[quoteStack.length - 1] === ch) {
           quoteStack.pop();
         }
 
         buffer += ch;
 
-        // 句末标点在闭引号之前时，在闭引号处结束段落。
+        // “……”闭合时，如果是完整句子，整个对话独立成段。
         if (
-          previousDepth > 0 &&
-          !isInsideQuote() &&
+          depthBefore > 0 &&
+          !insideQuote() &&
           endsSentence(buffer)
         ) {
           flush();
         }
-
         continue;
       }
 
       buffer += ch;
 
-      // 引号内部不按句末标点拆分。
-      if (isInsideQuote()) continue;
+      // 引号内部的句号不能拆开对话。
+      if (insideQuote()) continue;
 
-      // 引号外的普通句子在句末标点处分段。
       if (endPunctuation.has(ch)) {
         flush();
         continue;
       }
 
-      // 闭引号后有空格，且后面开始叙述时，另起一段。
-      // 如果后面紧接另一句带引号的对话，则保留为下一段。
+      // 闭引号后若接叙述，另起段。
       if (
         ch === " " &&
         /[”」』"’]/.test(prev) &&
@@ -635,7 +659,6 @@ function paragraphs(text) {
   }
 
   for (const block of mergedBlocks) {
-    // 普通单换行会被合并，不会把一句话从中间切断。
     output.push(...splitParagraph(block));
   }
 
