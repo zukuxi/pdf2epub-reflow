@@ -1,0 +1,604 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF / 图片 OCR 转 EPUB</title>
+<style>
+:root{color-scheme:light dark}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;max-width:850px;margin:0 auto;padding:20px;line-height:1.65}
+h1{font-size:1.6rem}
+.panel{border:1px solid #8886;border-radius:12px;padding:16px;margin:16px 0}
+button,select,input{font:inherit}
+button{padding:8px 14px;border-radius:8px;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+input[type=file]{max-width:100%;margin:8px 0}
+label{display:block;margin:10px 0}
+.muted{opacity:.72;font-size:.92rem}
+.file{display:flex;align-items:center;gap:8px;border-bottom:1px solid #8883;padding:7px 0}
+.file .name{flex:1;overflow-wrap:anywhere}
+.file button{padding:3px 9px}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+progress{width:100%;height:20px}
+#status{white-space:pre-wrap;overflow-wrap:anywhere}
+#log{max-height:240px;overflow:auto;font-size:.9rem}
+</style>
+</head>
+<body>
+<h1>PDF / 图片 OCR 转 EPUB</h1>
+<p class="muted">
+将扫描版 PDF 或漫画图片中的文字识别出来，生成可以调整字号和排版的纯文字 EPUB。
+所有识别过程在浏览器中进行，不上传文件到自己的服务器。
+</p>
+
+<div class="panel">
+<h2>1. 添加文件</h2>
+
+<label>
+<strong>扫描版 PDF（可多选）</strong><br>
+<input id="pdfInput" type="file" accept=".pdf,application/pdf" multiple>
+</label>
+
+<label>
+<strong>图片文件夹</strong><br>
+<input id="folderInput" type="file" accept="image/*" webkitdirectory directory multiple>
+</label>
+<p class="muted">
+在支持文件夹选择的浏览器中，选择文件夹即可。文件夹内的图片按路径及文件名自然排序，例如 1、2、10。
+</p>
+
+<label>
+<strong>或者直接多选图片</strong><br>
+<input id="imageInput" type="file" accept="image/*" multiple>
+</label>
+
+<div class="actions">
+<button id="clearBtn" type="button">清空全部文件</button>
+</div>
+<div id="fileList" aria-live="polite"></div>
+</div>
+
+<div class="panel">
+<h2>2. OCR 设置</h2>
+<label>
+识别语言
+<select id="language">
+<option value="eng">英语</option>
+<option value="jpn">日语</option>
+<option value="chi_sim">简体中文</option>
+<option value="eng+jpn">英语 + 日语</option>
+<option value="eng+chi_sim">英语 + 简体中文</option>
+<option value="jpn+chi_sim">日语 + 简体中文</option>
+<option value="eng+jpn+chi_sim">英语 + 日语 + 简体中文</option>
+</select>
+</label>
+
+<label>
+EPUB 书名
+<input id="bookTitle" type="text" placeholder="留空则自动生成" style="width:min(100%,420px)">
+</label>
+
+<label>
+每份 PDF 独立生成一个章节；所有图片合并为一个章节。
+</label>
+
+<p class="muted">
+首次使用需要联网加载 OCR 引擎及所选语言数据。混合语言识别通常更慢，也更耗内存。
+</p>
+</div>
+
+<div class="panel">
+<h2>3. 开始转换</h2>
+<button id="startBtn" type="button">开始 OCR 并生成 EPUB</button>
+<div style="margin-top:14px">
+<progress id="progress" max="100" value="0"></progress>
+<p id="status" aria-live="polite">等待添加文件。</p>
+</div>
+<div id="log"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+<script>
+"use strict";
+
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+}
+
+const $ = id => document.getElementById(id);
+
+let pdfFiles = [];
+let imageFiles = [];
+let busy = false;
+
+const naturalCompare = (a, b) =>
+  a.localeCompare(b, undefined, {
+    numeric: true,
+    sensitivity: "base"
+  });
+
+function imagePath(file) {
+  return file.webkitRelativePath || file.name;
+}
+
+function sortImages() {
+  imageFiles.sort((a, b) =>
+    naturalCompare(imagePath(a), imagePath(b))
+  );
+}
+
+function addUnique(target, incoming, keyFn) {
+  const seen = new Set(target.map(keyFn));
+  for (const file of incoming) {
+    const key = keyFn(file);
+    if (!seen.has(key)) {
+      target.push(file);
+      seen.add(key);
+    }
+  }
+}
+
+function renderFiles() {
+  const root = $("fileList");
+  root.replaceChildren();
+
+  const summary = document.createElement("p");
+  summary.textContent =
+    `已添加 ${pdfFiles.length} 份 PDF、${imageFiles.length} 张图片。`;
+  root.appendChild(summary);
+
+  function addGroup(title, items, type, getName) {
+    if (!items.length) return;
+
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    root.appendChild(heading);
+
+    items.forEach((file, index) => {
+      const row = document.createElement("div");
+      row.className = "file";
+
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = getName(file);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "删除";
+      remove.disabled = busy;
+      remove.addEventListener("click", () => {
+        if (type === "pdf") pdfFiles.splice(index, 1);
+        else imageFiles.splice(index, 1);
+        renderFiles();
+      });
+
+      row.append(name, remove);
+      root.appendChild(row);
+    });
+  }
+
+  addGroup("PDF 文件", pdfFiles, "pdf", f => f.name);
+  addGroup("图片文件（按名称排序）", imageFiles, "image", imagePath);
+}
+
+$("pdfInput").addEventListener("change", e => {
+  addUnique(pdfFiles, [...e.target.files], f =>
+    `${f.name}|${f.size}|${f.lastModified}`
+  );
+  renderFiles();
+  e.target.value = "";
+});
+
+function acceptImages(fileList) {
+  const incoming = [...fileList].filter(f =>
+    f.type.startsWith("image/") ||
+    /\.(jpe?g|png|webp|bmp|tiff?)$/i.test(f.name)
+  );
+
+  addUnique(imageFiles, incoming, f =>
+    `${imagePath(f)}|${f.size}|${f.lastModified}`
+  );
+  sortImages();
+  renderFiles();
+}
+
+$("imageInput").addEventListener("change", e => {
+  acceptImages(e.target.files);
+  e.target.value = "";
+});
+
+$("folderInput").addEventListener("change", e => {
+  acceptImages(e.target.files);
+  e.target.value = "";
+});
+
+$("clearBtn").addEventListener("click", () => {
+  if (busy) return;
+  pdfFiles = [];
+  imageFiles = [];
+  renderFiles();
+  setStatus("已清空文件列表。");
+});
+
+function setStatus(message) {
+  $("status").textContent = message;
+}
+
+function log(message) {
+  const line = document.createElement("div");
+  line.textContent = message;
+  $("log").appendChild(line);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function setProgress(value) {
+  $("progress").value = Math.max(0, Math.min(100, value));
+}
+
+function escapeXml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function safeFileName(name) {
+  return name
+    .replace(/\.[^.]+$/, "")
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .trim() || "章节";
+}
+
+function cleanText(text) {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00ad/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function fixEnglishHyphenation(text) {
+  return text.replace(
+    /([A-Za-z])-\n([a-z])/g,
+    "$1$2"
+  );
+}
+
+function textToXhtml(title, text) {
+  const cleaned = fixEnglishHyphenation(cleanText(text));
+  const paragraphs = cleaned
+    .split(/\n\s*\n/)
+    .map(p => p.replace(/\n/g, " ").trim())
+    .filter(Boolean);
+
+  const body = paragraphs.length
+    ? paragraphs.map(p => `<p>${escapeXml(p)}</p>`).join("\n")
+    : `<p>${escapeXml(cleaned)}</p>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh">
+<head>
+<meta charset="UTF-8"/>
+<title>${escapeXml(title)}</title>
+<style>
+body { font-family: serif; line-height: 1.8; margin: 5%; }
+p { text-indent: 2em; margin: 0 0 0.8em; overflow-wrap: anywhere; }
+h1 { text-align: center; margin: 1.5em 0; }
+</style>
+</head>
+<body>
+<h1>${escapeXml(title)}</h1>
+${body}
+</body>
+</html>`;
+}
+
+function makeChapterTitle(fileName, index) {
+  const base = safeFileName(fileName);
+  return base || `章节 ${index + 1}`;
+}
+
+async function canvasToText(worker, canvas) {
+  const result = await worker.recognize(canvas);
+  return result.data.text || "";
+}
+
+async function recognizeImage(worker, file) {
+  const bitmap = await createImageBitmap(file);
+  const maxSide = 2600;
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+
+  try {
+    return await canvasToText(worker, canvas);
+  } finally {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
+}
+
+async function recognizePdf(worker, file, onPage) {
+  const data = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  const pages = [];
+
+  try {
+    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+      setStatus(`正在识别 PDF：${file.name}\n第 ${pageNo}/${pdf.numPages} 页`);
+      const page = await pdf.getPage(pageNo);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const scale = Math.min(2.2, 2400 / baseViewport.width);
+      const viewport = page.getViewport({ scale });
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+
+      const ctx = canvas.getContext("2d", { alpha: false });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const text = await canvasToText(worker, canvas);
+      pages.push(text);
+
+      canvas.width = 1;
+      canvas.height = 1;
+      page.cleanup();
+
+      onPage();
+    }
+  } finally {
+    await pdf.destroy();
+  }
+
+  return pages.join("\n\n");
+}
+
+function makeUuid() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === "x" ? r : (r & 3 | 8)).toString(16);
+  });
+}
+
+async function createEpub(chapters, title) {
+  const zip = new JSZip();
+  const uid = makeUuid();
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  // EPUB 要求 mimetype 文件放在 ZIP 的第一个位置且不压缩。
+  zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+
+  zip.file("META-INF/container.xml", `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles>
+<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+</rootfiles>
+</container>`);
+
+  const manifest = [];
+  const spine = [];
+  const nav = [];
+
+  chapters.forEach((chapter, i) => {
+    const id = `chapter${i + 1}`;
+    const href = `chapter${i + 1}.xhtml`;
+
+    zip.file(`OEBPS/${href}`, textToXhtml(chapter.title, chapter.text));
+    manifest.push(`<item id="${id}" href="${href}" media-type="application/xhtml+xml"/>`);
+    spine.push(`<itemref idref="${id}"/>`);
+    nav.push(`<li><a href="${href}">${escapeXml(chapter.title)}</a></li>`);
+  });
+
+  zip.file("OEBPS/nav.xhtml", `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="zh">
+<head><title>目录</title></head>
+<body>
+<nav epub:type="toc" id="toc">
+<h1>目录</h1>
+<ol>${nav.join("\n")}</ol>
+</nav>
+</body>
+</html>`);
+
+  manifest.push(`<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>`);
+
+  zip.file("OEBPS/content.opf", `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="zh">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="bookid">urn:uuid:${uid}</dc:identifier>
+<dc:title>${escapeXml(title)}</dc:title>
+<dc:language>zh</dc:language>
+<dc:creator>OCR EPUB Tool</dc:creator>
+<meta property="dcterms:modified">${now}</meta>
+</metadata>
+<manifest>${manifest.join("\n")}</manifest>
+<spine>${spine.join("\n")}</spine>
+</package>`);
+
+  return zip.generateAsync({
+    type: "blob",
+    mimeType: "application/epub+zip",
+    compression: "DEFLATE",
+    compressionOptions: { level: 6 }
+  }, metadata => {
+    setProgress(metadata.percent);
+    setStatus(`正在打包 EPUB：${metadata.percent.toFixed(0)}%`);
+  });
+}
+
+async function startConversion() {
+  if (busy) return;
+
+  if (!pdfFiles.length && !imageFiles.length) {
+    setStatus("请先添加 PDF 或图片。");
+    return;
+  }
+
+  if (!window.pdfjsLib || !window.Tesseract || !window.JSZip) {
+    setStatus("依赖库加载失败。请检查网络连接并刷新页面。");
+    return;
+  }
+
+  busy = true;
+  $("startBtn").disabled = true;
+  $("clearBtn").disabled = true;
+  $("pdfInput").disabled = true;
+  $("imageInput").disabled = true;
+  $("folderInput").disabled = true;
+  $("language").disabled = true;
+  $("bookTitle").disabled = true;
+  $("log").replaceChildren();
+  setProgress(0);
+
+  let worker;
+
+  try {
+    const lang = $("language").value;
+    const chapters = [];
+
+    let totalPages = imageFiles.length;
+    for (const file of pdfFiles) {
+      const buffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+      totalPages += pdf.numPages;
+      await pdf.destroy();
+    }
+
+    if (!totalPages) throw new Error("没有可识别的页面。");
+
+    let completed = 0;
+    const updatePage = () => {
+      completed++;
+      setProgress(completed / totalPages * 90);
+    };
+
+    setStatus("正在启动 OCR 引擎。首次加载语言数据可能需要一些时间。");
+
+    worker = await Tesseract.createWorker(lang, 1, {
+      logger: message => {
+        if (message.status === "recognizing text") {
+          const pct = Math.round((message.progress || 0) * 100);
+          setStatus(`OCR 正在识别文字：${pct}%`);
+        }
+      }
+    });
+
+    // 每份 PDF 输出一个章节。
+    for (let i = 0; i < pdfFiles.length; i++) {
+      const file = pdfFiles[i];
+      log(`开始识别 PDF：${file.name}`);
+
+      const text = await recognizePdf(worker, file, updatePage);
+      chapters.push({
+        title: makeChapterTitle(file.name, i),
+        text
+      });
+
+      log(`完成：${file.name}`);
+    }
+
+    // 所有图片合并为一个章节，按自然排序识别。
+    if (imageFiles.length) {
+      const imageTexts = [];
+
+      for (let i = 0; i < imageFiles.length; i++) {
+        const file = imageFiles[i];
+        setStatus(
+          `正在识别图片 ${i + 1}/${imageFiles.length}\n${imagePath(file)}`
+        );
+
+        try {
+          const text = await recognizeImage(worker, file);
+          imageTexts.push(text);
+          log(`完成图片：${imagePath(file)}`);
+        } catch (error) {
+          imageTexts.push("");
+          log(`图片识别失败：${imagePath(file)} — ${error.message}`);
+        }
+
+        updatePage();
+      }
+
+      const folderName = imageFiles[0].webkitRelativePath
+        ? imageFiles[0].webkitRelativePath.split("/")[0]
+        : "图片合集";
+
+      chapters.push({
+        title: folderName || "图片合集",
+        text: imageTexts.join("\n\n")
+      });
+    }
+
+    await worker.terminate();
+    worker = null;
+
+    if (!chapters.some(ch => cleanText(ch.text))) {
+      throw new Error("没有识别出文字。请检查识别语言或原文件质量。");
+    }
+
+    const title = $("bookTitle").value.trim() ||
+      (chapters.length === 1 ? chapters[0].title : "OCR 转换合集");
+
+    setStatus("文字识别完成，正在生成 EPUB。");
+    const blob = await createEpub(chapters, title);
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeFileName(title)}.epub`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    setProgress(100);
+    setStatus(`转换完成！共生成 ${chapters.length} 个章节。`);
+    log("EPUB 已生成并开始下载。");
+  } catch (error) {
+    console.error(error);
+    setStatus(`转换失败：${error.message || error}`);
+    log(`错误：${error.stack || error}`);
+  } finally {
+    if (worker) {
+      try { await worker.terminate(); } catch (_) {}
+    }
+
+    busy = false;
+    $("startBtn").disabled = false;
+    $("clearBtn").disabled = false;
+    $("pdfInput").disabled = false;
+    $("imageInput").disabled = false;
+    $("folderInput").disabled = false;
+    $("language").disabled = false;
+    $("bookTitle").disabled = false;
+    renderFiles();
+  }
+}
+
+$("startBtn").addEventListener("click", startConversion);
+renderFiles();
+</script>
+</body>
+</html>
