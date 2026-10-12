@@ -23,7 +23,7 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>PDF 批量转 EPUB 超700字</h1>
+<h1>PDF 批量转 EPUB 超200字</h1>
 <p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
@@ -685,7 +685,7 @@ function paragraphs(text) {
    * 第二轮修复：
    * 1. 第一轮先正常运行。
    * 2. 逐一检查第一轮产生的段落，而不是只看整个合并块。
-   * 3. 某个段落超过 700 字时，才回看对应的原始块。
+   * 3. 某个段落超过 200 字时，才回看对应的原始块。
    * 4. 只有原文确实有多个空行分隔块，才尝试恢复边界。
    * 5. 恢复结果确实比第一轮更细时才采用，否则保留原结果。
    */
@@ -707,8 +707,7 @@ function paragraphs(text) {
 
     // 第一轮可能已分出多个段落，但仍然留下一个异常长段。
     const hasLongParagraph = firstResult.some(
-      paragraph => paragraph.length > 700
-    );
+      
 
     if (!hasLongParagraph) {
       firstPass.push(...firstResult);
