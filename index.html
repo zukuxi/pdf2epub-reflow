@@ -501,6 +501,83 @@ function splitHeadings(text, fallbackTitle) {
   while ((match = chapterMark.exec(String(text || ""))) !== null) {
     tokens.push({
       before: text.slice(lastIndex, match.index),
+
+function splitHeadings(text, fallbackTitle) {
+  const source = String(text || "");
+
+  // 支持：第52章、第52个章节、52话、第五十三章、
+  // 第六十次、这是第六十次。
+  // 「次」只在编号连续时作为章节候选，且必须有明确边界。
+  const chapterMark =
+    /(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:个\s*)?(章节|章|节|卷|部|篇|回|话|幕|次)(?:\s*[。．.!！?？])?(?=$|[\s\n])/g;
+
+  function toNumber(raw) {
+    if (!raw) return null;
+
+    raw = raw.replace(/[０-９]/g, c =>
+      String.fromCharCode(c.charCodeAt(0) - 0xFEE0)
+    );
+
+    if (/^\d+$/.test(raw)) return Number(raw);
+
+    const digits = {
+      零: 0, 〇: 0, 一: 1, 二: 2, 两: 2,
+      三: 3, 四: 4, 五: 5, 六: 6,
+      七: 7, 八: 8, 九: 9
+    };
+
+    if (/^[零〇一二两三四五六七八九]+$/.test(raw)) {
+      return Number([...raw].map(c => digits[c]).join(""));
+    }
+
+    // 廿三 = 23；卅一 = 31
+    if (raw.startsWith("廿") || raw.startsWith("卅")) {
+      const base = raw[0] === "廿" ? 20 : 30;
+      const rest = raw.slice(1);
+      if (!rest) return base;
+      if ([...rest].every(c => c in digits)) {
+        return base + Number([...rest].map(c => digits[c]).join(""));
+      }
+      return null;
+    }
+
+    const units = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
+    let total = 0;
+    let section = 0;
+    let number = 0;
+
+    for (const c of raw) {
+      if (c in digits) {
+        number = digits[c];
+      } else if (c in units) {
+        const unit = units[c];
+
+        if (unit === 10000) {
+          section += number;
+          total += (section || 1) * unit;
+          section = 0;
+          number = 0;
+        } else {
+          section += (number || (unit === 10 ? 1 : 0)) * unit;
+          number = 0;
+        }
+      } else {
+        return null;
+      }
+    }
+
+    return total + section + number;
+  }
+
+  const tokens = [];
+  let lastIndex = 0;
+  let match;
+
+  chapterMark.lastIndex = 0;
+
+  while ((match = chapterMark.exec(source)) !== null) {
+    tokens.push({
+      before: source.slice(lastIndex, match.index),
       marker: match[0],
       number: toNumber(match[1]),
       unit: match[2]
@@ -510,7 +587,7 @@ function splitHeadings(text, fallbackTitle) {
   }
 
   tokens.push({
-    before: text.slice(lastIndex),
+    before: source.slice(lastIndex),
     marker: "",
     number: null,
     unit: ""
@@ -524,58 +601,57 @@ function splitHeadings(text, fallbackTitle) {
   function flush() {
     const body = buffer.join("").trim();
 
-    if (body) {
-      chapters.push({ title, text: body });
-    }
-
+    if (body) chapters.push({ title, text: body });
     buffer = [];
   }
 
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-
-    if (token.before) {
-      buffer.push(token.before);
-    }
-
+  for (const token of tokens) {
+    if (token.before) buffer.push(token.before);
     if (!token.marker) continue;
 
     const marker = token.marker.trim();
     const number = token.number;
 
-    // 不认识的数字格式保留正文。
     if (number === null) {
       buffer.push(token.marker);
       continue;
     }
 
-    // 首个编号可以作为章节起点；
-    // 后续编号必须连续递增，避免误判正文中的“一回”“一部”等。
-    const isSequential =
+    // 第一个编号作为起点；后续必须连续递增。
+    const sequential =
       previousNumber === null ||
       number === previousNumber + 1;
 
-    if (!isSequential) {
+    if (!sequential) {
       buffer.push(token.marker);
       continue;
     }
 
-    // 只有前面已经出现过章节编号时，
-    // 才用编号连续性来判断后续候选标题。
+    let chapterTitle = marker;
+
+    // 如果标题是「这是第六十次。」，
+    // 将「这是」一起保留为标题，而不是塞进上一章正文。
+    if (token.unit === "次" && buffer.length) {
+      const last = buffer[buffer.length - 1];
+      const prefixMatch = last.match(/这是\s*$/);
+
+      if (prefixMatch) {
+        chapterTitle = prefixMatch[0] + marker;
+        buffer[buffer.length - 1] =
+          last.slice(0, last.length - prefixMatch[0].length);
+      }
+    }
+
     flush();
-    title = marker;
+    title = chapterTitle;
     previousNumber = number;
   }
 
   flush();
 
-  // 如果没有识别出章节，保底返回整篇正文。
   if (!chapters.length) {
-    const fullText = String(text || "").trim();
-
-    return fullText
-      ? [{ title: fallbackTitle, text: fullText }]
-      : [];
+    const body = source.trim();
+    return body ? [{ title: fallbackTitle, text: body }] : [];
   }
 
   return chapters;
