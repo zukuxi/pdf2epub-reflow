@@ -422,18 +422,13 @@ async function extractPDF(file, fileIndex) {
 }
 
 
-const headingPattern =
-  /^(?:[\[【（(]\s*)?(?:chapter|chap(?:ter)?\.?\s*[\w.-]+|(?:第\s*)?[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*(?:个\s*)?(?:章节|章|节|卷|部|篇|回|话|幕)[。．.!！]?.*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[\]】）)])?(?:\s*[:：\-—].*|\s+.*)?$/i;
-
-
-
-
 function splitHeadings(text, fallbackTitle) {
   const source = String(text || "");
 
-  // 支持：第52章、第52个章节、52话、第五十三章，以及连续编号的“第六十次”。
+  // 章节标记可能与上一段对话处于同一行；也支持外传、特别外传及“这是第120话”。
+  // “第58章开始。”这类章节分隔提示会整体消费，但标题仍只保留“第58章”，避免“开始。”成为正文残留。
   const chapterMark =
-    /(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:个\s*)?(章节|章|节|卷|部|篇|回|话|幕|次)(?:\s*[。．.!！?？])?(?=$|[\s\n])/g;
+    /(?:(特别外传|特别篇|外传|这是)\s*)?(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:个\s*)?(章节|章|节|卷|部|篇|回|话|幕|次)(?:开始)?(?:\s*[。．.!！?？])?(?=$|[\s\n。．.!！?？,，;；:：、」』”’"')）】])/g;
 
   function toNumber(raw) {
     if (!raw) return null;
@@ -443,16 +438,15 @@ function splitHeadings(text, fallbackTitle) {
     if (/^\d+$/.test(raw)) return Number(raw);
 
     const digits = {
-      零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4,
-      五: 5, 六: 6, 七: 7, 八: 8, 九: 9
+      零: 0, 〇: 0, 一: 1, 二: 2, 两: 2,
+      三: 3, 四: 4, 五: 5, 六: 6,
+      七: 7, 八: 8, 九: 9
     };
 
-    // 连续数字写法：二〇二四 = 2024。
     if (/^[零〇一二两三四五六七八九]+$/.test(raw)) {
       return Number([...raw].map(c => digits[c]).join(""));
     }
 
-    // 廿三 = 23；卅一 = 31。
     if (raw.startsWith("廿") || raw.startsWith("卅")) {
       const base = raw[0] === "廿" ? 20 : 30;
       const rest = raw.slice(1);
@@ -464,10 +458,7 @@ function splitHeadings(text, fallbackTitle) {
     }
 
     const units = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
-    let total = 0;
-    let section = 0;
-    let number = 0;
-
+    let total = 0, section = 0, number = 0;
     for (const c of raw) {
       if (c in digits) {
         number = digits[c];
@@ -490,97 +481,80 @@ function splitHeadings(text, fallbackTitle) {
   }
 
   const tokens = [];
-  let lastIndex = 0;
-  let match;
   chapterMark.lastIndex = 0;
-
+  let match;
   while ((match = chapterMark.exec(source)) !== null) {
+    const prefix = match[1] || "";
+    const marker = match[0].trim().replace(/开始[。．.!！?？]*$/, "");
+    const number = toNumber(match[2]);
+    const unit = match[3];
+    const before = source.slice(0, match.index);
+    const currentLine = before.slice(before.lastIndexOf("\n") + 1).trimEnd();
+    const atLineStart = currentLine.trim() === "";
+    const afterSentence = /[。！？!?…」』”’"')）】]$/.test(currentLine.trimEnd());
+    const hasExplicitPrefix = !!prefix || /第\s*/.test(marker);
+
+    // 章节通常独立成行；少数 PDF 把标题接在对话句末。
+    // 不要求编号必须连续，避免缺一话后导致后续所有章节都无法识别。
+    if (!hasExplicitPrefix && !atLineStart && !afterSentence) continue;
+    if (!atLineStart && !afterSentence && !prefix) continue;
+
     tokens.push({
-      before: source.slice(lastIndex, match.index),
-      marker: match[0],
-      number: toNumber(match[1]),
-      unit: match[2],
-      explicitDi: /^第\s*/.test(match[0])
+      start: match.index,
+      end: match.index + match[0].length,
+      marker: marker,
+      title: (prefix ? prefix : "") + marker.replace(/^(?:特别外传|特别篇|外传|这是)\s*/, ""),
+      number,
+      unit,
+      prefix,
+      explicit: /第\s*/.test(marker),
+      atLineStart,
+      afterSentence
     });
-    lastIndex = match.index + match[0].length;
   }
 
-  tokens.push({
-    before: source.slice(lastIndex),
-    marker: "",
-    number: null,
-    unit: "",
-    explicitDi: false
-  });
-
-  const chapters = [];
-  let title = fallbackTitle;
-  let buffer = [];
+  const accepted = [];
   let previousNumber = null;
-
-  function flush() {
-    const body = buffer.join("").trim();
-    if (body) chapters.push({ title, text: body });
-    buffer = [];
-  }
-
+  let previousWasExtra = false;
   for (const token of tokens) {
-    if (token.before) buffer.push(token.before);
-    if (!token.marker) continue;
-
-    const marker = token.marker.trim();
-    const number = token.number;
-    if (number === null) {
-      buffer.push(token.marker);
+    const isExtra = /^(特别外传|特别篇|外传)/.test(token.title);
+    // 正篇编号只要求递增，不要求严格连续；外传/特别篇允许从 1 重新编号。
+    if (previousNumber !== null && !isExtra && !previousWasExtra && token.number <= previousNumber) {
       continue;
     }
-
-    const beforeText = buffer.join("");
-    const atLineStart = !beforeText.trim() || /[\n\r]\s*$/.test(beforeText);
-    const endsWithZheshici = /这是\s*$/.test(beforeText);
-    const isSpecialCi = token.unit === "次";
-
-    // “次”不是常规章节单位：只接受独立标题，或“这是第N次。”这种
-    // 编号连续的特殊标题；“第N次尝试”因边界检查不会被匹配。
-    if (isSpecialCi && !atLineStart && !endsWithZheshici) {
-      buffer.push(token.marker);
-      continue;
-    }
-
-    // 第一个编号必须有明显标题特征；之后必须严格连续递增。
-    // 被拒绝的候选会原样放回正文，不会丢字。
-    const sequential = previousNumber === null
-      ? (token.explicitDi || atLineStart)
-      : number === previousNumber + 1;
-
-    if (!sequential) {
-      buffer.push(token.marker);
-      continue;
-    }
-
-    let chapterTitle = marker;
-    if (isSpecialCi && endsWithZheshici) {
-      const prefixMatch = beforeText.match(/这是\s*$/);
-      if (prefixMatch) {
-        chapterTitle = prefixMatch[0] + marker;
-        const last = buffer.length - 1;
-        buffer[last] = buffer[last].slice(0, buffer[last].length - prefixMatch[0].length);
-      }
-    }
-
-    flush();
-    title = chapterTitle;
-    previousNumber = number;
+    accepted.push(token);
+    previousNumber = token.number;
+    previousWasExtra = isExtra;
   }
 
-  flush();
-
-  if (!chapters.length) {
+  if (!accepted.length) {
     const body = source.trim();
     return body ? [{ title: fallbackTitle, text: body }] : [];
   }
+
+  const chapters = [];
+  let cursor = 0;
+  let title = fallbackTitle;
+  let buffer = "";
+
+  function flush() {
+    const body = buffer.trim();
+    if (body) chapters.push({ title, text: body });
+    buffer = "";
+  }
+
+  for (const token of accepted) {
+    buffer += source.slice(cursor, token.start);
+    flush();
+    title = token.title;
+    cursor = token.end;
+  }
+  buffer += source.slice(cursor);
+  flush();
+
   return chapters;
 }
+
 
 
 function makeChapters(documents) {
