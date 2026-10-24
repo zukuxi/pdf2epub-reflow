@@ -426,7 +426,19 @@ const headingPattern =
   /^(?:[\[【（(]\s*)?(?:chapter|chap(?:ter)?\.?\s*[\w.-]+|第\s*[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*[章节卷部篇回话].*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[\]】）)])?(?:\s*[:：\-—].*|\s+.*)?$/i;
 
 
+
 function splitHeadings(text, fallbackTitle) {
+  // 有些 PDF 提取后会把章节标题与正文拼在同一行，
+  // 先将“第一话”“第2话”等章节标记单独分行。
+  const chapterMark =
+    /第\s*[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*[章节卷部篇回话]/g;
+
+  text = String(text || "").replace(
+    /第\s*[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*[章节卷部篇回话]/g,
+    "\n$&\n"
+  );
+
+  // 同时支持常见的中文章节标题和英文标题
   const lines = text.split(/\n/);
   const chapters = [];
 
@@ -436,31 +448,42 @@ function splitHeadings(text, fallbackTitle) {
   for (const line of lines) {
     const t = line.trim();
 
-    const isHeading =
+    const isChapterMark =
+      t.length > 0 &&
+      t.length <= 30 &&
+      chapterMark.test(t);
+
+    chapterMark.lastIndex = 0;
+
+    const isOtherHeading =
       t.length > 0 &&
       t.length <= 90 &&
       headingPattern.test(t);
 
-    if (isHeading) {
-  const body = buffer.join("\n").trim();
+    if (isChapterMark || isOtherHeading) {
+      const body = buffer.join("\n").trim();
 
-  if (body) {
-    chapters.push({ title, text: body });
-  }
+      if (body) {
+        chapters.push({ title, text: body });
+      }
 
-  title = t;
-  buffer = [];
-  continue;
-}
+      title = t;
+      buffer = [];
+      continue;
+    }
 
-buffer.push(line);
+    if (t) buffer.push(t);
   }
 
   const last = buffer.join("\n").trim();
-  if (last) chapters.push({ title, text: last });
+
+  if (last) {
+    chapters.push({ title, text: last });
+  }
 
   return chapters;
 }
+
 
 function makeChapters(documents) {
   const keepFiles = $("keepFiles").checked;
