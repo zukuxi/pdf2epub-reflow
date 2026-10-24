@@ -423,7 +423,7 @@ async function extractPDF(file, fileIndex) {
 
 
 const headingPattern =
-  /^(?:[\[【（(]\s*)?(?:chapter|chap(?:ter)?\.?\s*[\w.-]+|(?:第\s*)?[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*(?:章节|章|节|卷|部|篇|回|话|幕)[。．.!！]?.*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[\]】）)])?(?:\s*[:：\-—].*|\s+.*)?$/i;
+  /^(?:[\[【（(]\s*)?(?:chapter|chap(?:ter)?\.?\s*[\w.-]+|(?:第\s*)?[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*(?:个\s*)?(?:章节|章|节|卷|部|篇|回|话|幕)[。．.!！]?.*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[\]】）)])?(?:\s*[:：\-—].*|\s+.*)?$/i;
 
 
 
@@ -431,7 +431,7 @@ const headingPattern =
 function splitHeadings(text, fallbackTitle) {
   // 支持：第53话、53话、五十三话、第五十三话、5话。
   const chapterMark =
-    /(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(章节|章|节|卷|部|篇|回|话|幕)\s*[。．.!！]?/g;
+  /(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:个\s*)?(章节|章|节|卷|部|篇|回|话|幕)\s*[。．.!！]?/g;
 
   function toNumber(raw) {
     if (!raw) return null;
