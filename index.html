@@ -422,7 +422,7 @@ async function extractPDF(file, fileIndex) {
 }
 
 const headingPattern =
-  /^(chapter|chap(?:ter)?\.?\s*[\w.-]+|第[0-9一二三四五六七八九十百零〇两]+[章节卷部篇回].*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[:：\-—].*)?$/i;
+  /^(chapter|chap(?:ter)?\.?\s*[\w.-]+|第[0-9一二三四五六七八九十百零〇两]+[章节卷部篇回话].*|序章|序言|前言|楔子|尾声|后记|番外(?:篇)?(?:\s*\d*)?|prologue|epilogue|preface|afterword|interlude)(?:\s*[:：\-—].*)?$/i;
 
 function splitHeadings(text, fallbackTitle) {
   const lines = text.split(/\n/);
@@ -439,15 +439,19 @@ function splitHeadings(text, fallbackTitle) {
       t.length <= 90 &&
       headingPattern.test(t);
 
-    if (isHeading && buffer.join("\n").trim().length > 80) {
-      const body = buffer.join("\n").trim();
-      if (body) chapters.push({ title, text: body });
+    if (isHeading) {
+  const body = buffer.join("\n").trim();
 
-      title = t;
-      buffer = [];
-    }
+  if (body) {
+    chapters.push({ title, text: body });
+  }
 
-    buffer.push(line);
+  title = t;
+  buffer = [];
+  continue;
+}
+
+buffer.push(line);
   }
 
   const last = buffer.join("\n").trim();
@@ -475,8 +479,13 @@ function makeChapters(documents) {
             chapters.push(part);
           });
         } else {
-          chapters.push({ title: doc.name, text: doc.text });
-        }
+  const only = parts[0];
+
+  chapters.push({
+    title: only && only.title ? only.title : doc.name,
+    text: only && only.text ? only.text : doc.text
+  });
+}
       } else {
         chapters.push({ title: doc.name, text: doc.text });
       }
