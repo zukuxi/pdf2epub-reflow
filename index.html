@@ -427,64 +427,160 @@ const headingPattern =
 
 
 
+
 function splitHeadings(text, fallbackTitle) {
-  // 兼容机翻文档中的章节标记：
-  // 第一话、第2话、38话、5话。、第七幕。
-  // 章节号即使夹在正文中间，也先拆成独立行。
+  // 支持：第53话、53话、五十三话、第五十三话、5话。
   const chapterMark =
-    /(?:第\s*)?[0-9０-９一二三四五六七八九十百千万零〇两廿卅]+\s*(?:章节|章|节|卷|部|篇|回|话|幕)\s*[。．.!！]?/g;
+    /(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(章节|章|节|卷|部|篇|回|话|幕)\s*[。．.!！]?/g;
 
-  text = String(text || "").replace(
-    chapterMark,
-    "\n$&\n"
-  );
+  function toNumber(raw) {
+    if (!raw) return null;
 
-  const lines = text.split(/\n/);
+    raw = raw.replace(/[０-９]/g, c =>
+      String.fromCharCode(c.charCodeAt(0) - 0xFEE0)
+    );
+
+    if (/^\d+$/.test(raw)) {
+      return Number(raw);
+    }
+
+    const digits = {
+      零: 0, 〇: 0, 一: 1, 二: 2, 两: 2,
+      三: 3, 四: 4, 五: 5, 六: 6,
+      七: 7, 八: 8, 九: 9
+    };
+
+    const units = {
+      十: 10, 百: 100, 千: 1000, 万: 10000
+    };
+
+    if (/^[零〇一二两三四五六七八九]+$/.test(raw)) {
+      return Number(
+        [...raw].map(c => digits[c]).join("")
+      );
+    }
+
+    let total = 0;
+    let section = 0;
+    let number = 0;
+
+    for (const c of raw) {
+      if (c === "廿") {
+        section += 20;
+      } else if (c === "卅") {
+        section += 30;
+      } else if (c in digits) {
+        number = digits[c];
+      } else if (c in units) {
+        const unit = units[c];
+
+        if (unit === 10000) {
+          section += number;
+          total += (section || 1) * unit;
+          section = 0;
+          number = 0;
+        } else {
+          section += (number || (unit === 10 ? 1 : 0)) * unit;
+          number = 0;
+        }
+      } else {
+        return null;
+      }
+    }
+
+    return total + section + number;
+  }
+
+  // 先把章节标记独立出来，确保标记前后的正文不会丢失。
+  const tokens = [];
+  let lastIndex = 0;
+  let match;
+
+  chapterMark.lastIndex = 0;
+
+  while ((match = chapterMark.exec(String(text || ""))) !== null) {
+    tokens.push({
+      before: text.slice(lastIndex, match.index),
+      marker: match[0],
+      number: toNumber(match[1]),
+      unit: match[2]
+    });
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  tokens.push({
+    before: text.slice(lastIndex),
+    marker: "",
+    number: null,
+    unit: ""
+  });
+
   const chapters = [];
-
   let title = fallbackTitle;
   let buffer = [];
+  let previousNumber = null;
 
-  for (const line of lines) {
-    const t = line.trim();
+  function flush() {
+    const body = buffer.join("").trim();
 
-    chapterMark.lastIndex = 0;
-    const isChapterMark =
-      t.length > 0 &&
-      t.length <= 30 &&
-      chapterMark.test(t);
-    chapterMark.lastIndex = 0;
+    if (body) {
+      chapters.push({ title, text: body });
+    }
 
-    const isOtherHeading =
-      t.length > 0 &&
-      t.length <= 90 &&
-      headingPattern.test(t);
+    buffer = [];
+  }
 
-    if (isChapterMark || isOtherHeading) {
-      const body = buffer.join("\n").trim();
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
 
-      if (body) {
-        chapters.push({ title, text: body });
-      }
+    if (token.before) {
+      buffer.push(token.before);
+    }
 
-      title = t;
-      buffer = [];
+    if (!token.marker) continue;
+
+    const marker = token.marker.trim();
+    const number = token.number;
+
+    // 不认识的数字格式保留正文。
+    if (number === null) {
+      buffer.push(token.marker);
       continue;
     }
 
-    if (t) {
-      buffer.push(t);
+    // 首个编号可以作为章节起点；
+    // 后续编号必须连续递增，避免误判正文中的“一回”“一部”等。
+    const isSequential =
+      previousNumber === null ||
+      number === previousNumber + 1;
+
+    if (!isSequential) {
+      buffer.push(token.marker);
+      continue;
     }
+
+    // 只有前面已经出现过章节编号时，
+    // 才用编号连续性来判断后续候选标题。
+    flush();
+    title = marker;
+    previousNumber = number;
   }
 
-  const last = buffer.join("\n").trim();
+  flush();
 
-  if (last) {
-    chapters.push({ title, text: last });
+  // 如果没有识别出章节，保底返回整篇正文。
+  if (!chapters.length) {
+    const fullText = String(text || "").trim();
+
+    return fullText
+      ? [{ title: fallbackTitle, text: fullText }]
+      : [];
   }
 
   return chapters;
 }
+
 
 
 function makeChapters(documents) {
