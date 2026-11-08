@@ -40,6 +40,7 @@ progress{width:100%}
 <label><input id="keepFiles" type="checkbox" checked> 每份 PDF 保留独立章节</label>
 <label><input id="detect" type="checkbox" checked> 自动识别章节标题并生成目录</label>
 <label><input id="clean" type="checkbox" checked> 清理中文多余空格和英文断词</label>
+<label><input id="lineBreaks" type="checkbox"> 分行（保留 PDF 提取的原始文字行）</label>
 <button id="start" class="primary" disabled>开始转换并下载 EPUB</button>
 </section>
 
@@ -189,18 +190,37 @@ function cleanText(s) {
   s = String(s)
     .replace(/\u00a0/g, " ")
     .replace(/\r\n?/g, "\n")
+    // Remove the Aspose evaluation watermark wherever it appears in extracted text.
+    .replace(/Evaluation\s+Only\.?\s*Created\s+with\s+Aspose\.PDF\.?\s*Copyright\s+2002\s*[-–—]\s*2026\s+Aspose\s+Pty\s+Ltd\.?/gi, "")
     .replace(/([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g, "$1$2");
 
   const lines = s.split("\n").map(line =>
     line.replace(/[ \t]+/g, " ").trim()
   );
 
+  // "分行"模式：保留提取到的每一行，不按句号重新合并。
+  if ($("lineBreaks").checked) {
+    return lines
+      .filter(Boolean)
+      .map(line => {
+        if (!$("clean").checked) return line;
+        return line
+          .replace(/([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g, "$1")
+          .replace(/([，。！？；：、])[ \t]+/g, "$1")
+          .replace(/([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g, "$1$2")
+          .replace(/([（【「『〔〈])[ \t]+/g, "$1")
+          .replace(/[ \t]+([）】」』〕〉])/g, "$1");
+      })
+      .join("\n\n")
+      .trim();
+  }
+
   const blocks = [];
   let current = [];
 
   function pushCurrent() {
     if (current.length) {
-      blocks.push(current.join(" "));
+      blocks.push(current.join(""));
       current = [];
     }
   }
@@ -211,11 +231,17 @@ function cleanText(s) {
       continue;
     }
 
+    // Decorative separators and sound-effect lines stay independent.
     if (isStarLine(line) || isSoundLine(line)) {
       pushCurrent();
       blocks.push(line.trim());
-    } else {
-      current.push(line);
+      continue;
+    }
+
+    // Join source lines directly until a Chinese full stop ends the sentence.
+    current.push(line);
+    if (/。[”」』’）】]*$/.test(line)) {
+      pushCurrent();
     }
   }
 
@@ -229,14 +255,11 @@ function cleanText(s) {
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
         "$1"
       );
-
       result = result.replace(/([，。！？；：、])[ \t]+/g, "$1");
-
       result = result.replace(
         /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
         "$1$2"
       );
-
       result = result.replace(/([（【「『〔〈])[ \t]+/g, "$1");
       result = result.replace(/[ \t]+([）】」』〕〉])/g, "$1");
     }
@@ -244,7 +267,6 @@ function cleanText(s) {
     return result.trim();
   }).filter(Boolean).join("\n\n").trim();
 }
-
 function extractLines(items) {
   const raw = [];
 
@@ -334,7 +356,10 @@ function extractLines(items) {
     line.text = joinItems(line);
   }
 
-  const nonEmpty = lines.filter(line => line.text);
+  const nonEmpty = lines.filter(line => {
+    if (!line.text) return false;
+    return !/^(?:Evaluation\s+Only\.?|Created\s+with\s+Aspose\.PDF\.?|Copyright\s+2002\s*[-–—]\s*2026\s+Aspose\s+Pty\s+Ltd\.?)$/i.test(line.text.trim());
+  });
   if (!nonEmpty.length) return "";
 
   const gaps = [];
@@ -398,12 +423,37 @@ async function extractPDF(file, fileIndex) {
   }).promise;
 
   const pages = [];
+  let coverDataUrl = null;
 
   for (let p = 1; p <= pdf.numPages; p++) {
     status(`正在提取 ${file.name}：第 ${p}/${pdf.numPages} 页`);
 
     const page = await pdf.getPage(p);
     const content = await page.getTextContent();
+
+    // The first PDF's first page becomes the EPUB cover only if it contains an image.
+    if (fileIndex === 0 && p === 1) {
+      const ops = await page.getOperatorList();
+      const imageOps = new Set([
+        pdfjsLib.OPS.paintImageXObject,
+        pdfjsLib.OPS.paintInlineImageXObject,
+        pdfjsLib.OPS.paintImageMaskXObject,
+        pdfjsLib.OPS.paintImageXObjectRepeat
+      ].filter(value => value !== undefined));
+      const hasImage = ops.fnArray.some(fn => imageOps.has(fn));
+
+      if (hasImage) {
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const context = canvas.getContext("2d", { alpha: false });
+        await page.render({ canvasContext: context, viewport }).promise;
+        coverDataUrl = canvas.toDataURL("image/jpeg", 0.88);
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    }
 
     pages.push(extractLines(content.items));
 
@@ -417,7 +467,8 @@ async function extractPDF(file, fileIndex) {
   return {
     name: file.name.replace(/\.pdf$/i, ""),
     pageCount: pdf.numPages,
-    text: cleanText(pages.join("\n"))
+    text: cleanText(pages.join("\n")),
+    coverDataUrl
   };
 }
 
@@ -602,6 +653,15 @@ function paragraphs(text) {
   const source = String(text || "")
     .replace(/\u00a0/g, " ")
     .replace(/\r\n?/g, "\n");
+
+  if ($("lineBreaks").checked) {
+    return source
+      .split(/\n+/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => "<p>" + escapeHTML(line) + "</p>")
+      .join("\n");
+  }
 
   const rawBlocks = source
     .split(/\n[ \t]*\n+/)
@@ -852,6 +912,15 @@ $("start").addEventListener("click", async () => {
     let manifest = "";
     let spine = "";
     let toc = "<ol>";
+    const coverDataUrl = documents[0] && documents[0].coverDataUrl;
+    if (coverDataUrl) {
+      const coverBase64 = coverDataUrl.split(",")[1];
+      const coverBinary = atob(coverBase64);
+      const coverBytes = new Uint8Array(coverBinary.length);
+      for (let i = 0; i < coverBinary.length; i++) coverBytes[i] = coverBinary.charCodeAt(i);
+      zip.file("OEBPS/cover.jpg", coverBytes, { binary: true });
+      manifest += '<item id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>';
+    }
 
     chapters.forEach((chapter, i) => {
       const id = `ch${i + 1}`;
@@ -897,6 +966,7 @@ $("start").addEventListener("click", async () => {
 <dc:title>${escapeHTML(title)}</dc:title>
 <dc:language>zh</dc:language>
 <dc:creator>${escapeHTML(author)}</dc:creator>
+${coverDataUrl ? '<meta name="cover" content="cover-image"/>' : ''}
 <meta property="dcterms:modified">${modified}</meta>
 </metadata>
 <manifest>
