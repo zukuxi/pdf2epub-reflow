@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -23,8 +22,8 @@ progress{width:100%}
 </style>
 </head>
 <body>
-<h1>非图片PDF批量转EPUB（修复换行）</h1>
-<p class="muted">换行修复，批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
+<h1>非图片PDF批量转EPUB</h1>
+<p class="muted">批量提取 PDF 文字、合并正文、识别章节并生成 EPUB 目录。文件在浏览器本地处理。</p>
 
 <section>
 <h2>1. 选择 PDF</h2>
@@ -59,10 +58,9 @@ progress{width:100%}
 
 const $ = id => document.getElementById(id);
 let files = [];
-
-// 记录上一次自动生成的书名，区分自动填入和手动编辑。
 let lastAutoTitle = "";
 let titleManuallyEdited = false;
+let coverFound = false;
 
 if (window.pdfjsLib) {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -127,7 +125,6 @@ function renderFiles() {
           const target = i + delta;
           [files[i], files[target]] = [files[target], files[i]];
         }
-
         renderFiles();
       };
 
@@ -140,8 +137,6 @@ function renderFiles() {
   $("start").disabled = false;
 }
 
-// 用户手动编辑书名时，记住用户的选择。
-// 如果用户把书名改回自动生成的名字，则重新允许自动更新。
 $("title").addEventListener("input", () => {
   titleManuallyEdited =
     $("title").value.trim() !== lastAutoTitle;
@@ -184,33 +179,61 @@ function isSoundLine(s) {
   );
 }
 
+function removeAsposeWatermark(s) {
+  return String(s || "")
+    .replace(
+      /Evaluation\s+Only\.?\s*Created\s+with\s+Aspose\.PDF\.?\s*Copyright\s+2002\s*[-–—]\s*2026\s+Aspose\s+Pty\s+Ltd\.?/gi,
+      ""
+    )
+    .replace(
+      /Evaluation\s+Only\.?\s*Created\s+with\s+Aspose\.PDF\.?/gi,
+      ""
+    )
+    .replace(
+      /Copyright\s+2002\s*[-–—]\s*2026\s+Aspose\s+Pty\s+Ltd\.?/gi,
+      ""
+    );
+}
+
+function normalizeText(s) {
+  let result = String(s || "").trim();
+
+  if ($("clean").checked) {
+    result = result
+      .replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
+        "$1"
+      )
+      .replace(/([，。！？；：、])[ \t]+/g, "$1")
+      .replace(
+        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
+        "$1$2"
+      )
+      .replace(/([（【「『〔〈])[ \t]+/g, "$1")
+      .replace(/[ \t]+([）】」』〕〉])/g, "$1");
+  }
+
+  return result.trim();
+}
+
 function cleanText(s) {
   if (!s) return "";
 
-  s = String(s)
+  s = removeAsposeWatermark(String(s)
     .replace(/\u00a0/g, " ")
     .replace(/\r\n?/g, "\n")
-    // Remove the Aspose evaluation watermark wherever it appears in extracted text.
-    .replace(/Evaluation\s+Only\.?\s*Created\s+with\s+Aspose\.PDF\.?\s*Copyright\s+2002\s*[-–—]\s*2026\s+Aspose\s+Pty\s+Ltd\.?/gi, "")
-    .replace(/([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g, "$1$2");
+    .replace(/([A-Za-z])-[ \t]*\n[ \t]*([a-z])/g, "$1$2"));
 
   const lines = s.split("\n").map(line =>
     line.replace(/[ \t]+/g, " ").trim()
   );
 
-  // "分行"模式：保留提取到的每一行，不按句号重新合并。
   if ($("lineBreaks").checked) {
     return lines
       .filter(Boolean)
-      .map(line => {
-        if (!$("clean").checked) return line;
-        return line
-          .replace(/([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g, "$1")
-          .replace(/([，。！？；：、])[ \t]+/g, "$1")
-          .replace(/([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g, "$1$2")
-          .replace(/([（【「『〔〈])[ \t]+/g, "$1")
-          .replace(/[ \t]+([）】」』〕〉])/g, "$1");
-      })
+      .filter(line => !/^Evaluation\s+Only|^Created\s+with\s+Aspose|^Copyright\s+2002/i.test(line))
+      .map(normalizeText)
+      .filter(Boolean)
       .join("\n\n")
       .trim();
   }
@@ -220,7 +243,7 @@ function cleanText(s) {
 
   function pushCurrent() {
     if (current.length) {
-      blocks.push(current.join(""));
+      blocks.push(normalizeText(current.join("")));
       current = [];
     }
   }
@@ -231,42 +254,30 @@ function cleanText(s) {
       continue;
     }
 
-    // Decorative separators and sound-effect lines stay independent.
-    if (isStarLine(line) || isSoundLine(line)) {
-      pushCurrent();
-      blocks.push(line.trim());
+    if (
+      /^Evaluation\s+Only/i.test(line) ||
+      /^Created\s+with\s+Aspose/i.test(line) ||
+      /^Copyright\s+2002/i.test(line)
+    ) {
       continue;
     }
 
-    // Join source lines directly until a Chinese full stop ends the sentence.
-    current.push(line);
-    if (/。[”」』’）】]*$/.test(line)) {
+    if (isStarLine(line) || isSoundLine(line)) {
       pushCurrent();
+      blocks.push(normalizeText(line));
+      continue;
     }
+
+    // 同一段落中，PDF 自动折行直接连接。
+    // 原始 PDF 识别出的段落间隔仍然保留。
+    current.push(line);
   }
 
   pushCurrent();
 
-  return blocks.map(block => {
-    let result = block;
-
-    if ($("clean").checked) {
-      result = result.replace(
-        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
-        "$1"
-      );
-      result = result.replace(/([，。！？；：、])[ \t]+/g, "$1");
-      result = result.replace(
-        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
-        "$1$2"
-      );
-      result = result.replace(/([（【「『〔〈])[ \t]+/g, "$1");
-      result = result.replace(/[ \t]+([）】」』〕〉])/g, "$1");
-    }
-
-    return result.trim();
-  }).filter(Boolean).join("\n\n").trim();
+  return blocks.filter(Boolean).join("\n\n").trim();
 }
+
 function extractLines(items) {
   const raw = [];
 
@@ -320,7 +331,6 @@ function extractLines(items) {
 
   function joinItems(line) {
     const parts = line.items.sort((a, b) => a.x - b.x);
-
     let result = "";
     let previous = null;
 
@@ -356,10 +366,7 @@ function extractLines(items) {
     line.text = joinItems(line);
   }
 
-  const nonEmpty = lines.filter(line => {
-    if (!line.text) return false;
-    return !/^(?:Evaluation\s+Only\.?|Created\s+with\s+Aspose\.PDF\.?|Copyright\s+2002\s*[-–—]\s*2026\s+Aspose\s+Pty\s+Ltd\.?)$/i.test(line.text.trim());
-  });
+  const nonEmpty = lines.filter(line => line.text);
   if (!nonEmpty.length) return "";
 
   const gaps = [];
@@ -417,6 +424,137 @@ function extractLines(items) {
   return output.join("\n");
 }
 
+/* 从 PDF 页面提取第一个嵌入图片 */
+
+function imageToDataURL(img) {
+  try {
+    if (!img) return null;
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    if (img.bitmap) {
+      canvas.width = img.bitmap.width;
+      canvas.height = img.bitmap.height;
+      ctx.drawImage(img.bitmap, 0, 0);
+    } else if (
+      img.data &&
+      img.width &&
+      img.height
+    ) {
+      canvas.width = img.width;
+      canvas.height = img.height;
+
+      const data = img.data;
+      const pixels = new Uint8ClampedArray(img.width * img.height * 4);
+
+      if (data.length === pixels.length) {
+        pixels.set(data);
+      } else if (data.length === img.width * img.height * 3) {
+        for (let j = 0, k = 0; j < data.length; j += 3, k += 4) {
+          pixels[k] = data[j];
+          pixels[k + 1] = data[j + 1];
+          pixels[k + 2] = data[j + 2];
+          pixels[k + 3] = 255;
+        }
+      } else if (data.length === img.width * img.height) {
+        for (let j = 0, k = 0; j < data.length; j++, k += 4) {
+          pixels[k] = data[j];
+          pixels[k + 1] = data[j];
+          pixels[k + 2] = data[j];
+          pixels[k + 3] = 255;
+        }
+      } else {
+        return null;
+      }
+
+      ctx.putImageData(
+        new ImageData(pixels, img.width, img.height),
+        0,
+        0
+      );
+    } else if (
+      img.width &&
+      img.height &&
+      typeof img === "object"
+    ) {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+    } else {
+      return null;
+    }
+
+    const result = canvas.toDataURL("image/jpeg", 0.92);
+    canvas.width = 0;
+    canvas.height = 0;
+
+    return result && result.length > 1000 ? result : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getPageImage(page) {
+  return new Promise(async resolve => {
+    try {
+      const ops = await page.getOperatorList();
+
+      const imageOps = new Set([
+        pdfjsLib.OPS.paintImageXObject,
+        pdfjsLib.OPS.paintInlineImageXObject,
+        pdfjsLib.OPS.paintImageMaskXObject,
+        pdfjsLib.OPS.paintImageXObjectRepeat,
+        pdfjsLib.OPS.paintInlineImageXObjectGroup
+      ].filter(v => v !== undefined));
+
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        if (!imageOps.has(ops.fnArray[i])) continue;
+
+        const args = ops.argsArray[i];
+        if (!args || !args.length) continue;
+
+        const ref = args[0];
+
+        if (ref && typeof ref === "object") {
+          const direct = imageToDataURL(ref);
+          if (direct) return resolve(direct);
+        }
+
+        if (typeof ref === "string") {
+          try {
+            const img = await new Promise(done => {
+              let finished = false;
+
+              const timer = setTimeout(() => {
+                if (!finished) {
+                  finished = true;
+                  done(null);
+                }
+              }, 3000);
+
+              page.objs.get(ref, obj => {
+                if (!finished) {
+                  finished = true;
+                  clearTimeout(timer);
+                  done(obj);
+                }
+              });
+            });
+
+            const result = imageToDataURL(img);
+            if (result) return resolve(result);
+          } catch (e) {}
+        }
+      }
+
+      resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
 async function extractPDF(file, fileIndex) {
   const pdf = await pdfjsLib.getDocument({
     data: await file.arrayBuffer()
@@ -429,32 +567,17 @@ async function extractPDF(file, fileIndex) {
     status(`正在提取 ${file.name}：第 ${p}/${pdf.numPages} 页`);
 
     const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
 
-    // The first PDF's first page becomes the EPUB cover only if it contains an image.
-    if (fileIndex === 0 && p === 1) {
-      const ops = await page.getOperatorList();
-      const imageOps = new Set([
-        pdfjsLib.OPS.paintImageXObject,
-        pdfjsLib.OPS.paintInlineImageXObject,
-        pdfjsLib.OPS.paintImageMaskXObject,
-        pdfjsLib.OPS.paintImageXObjectRepeat
-      ].filter(value => value !== undefined));
-      const hasImage = ops.fnArray.some(fn => imageOps.has(fn));
+    // 只提取整批 PDF 中找到的第一张图片。
+    if (!coverFound) {
+      coverDataUrl = await getPageImage(page);
 
-      if (hasImage) {
-        const viewport = page.getViewport({ scale: 1.5 });
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.ceil(viewport.width);
-        canvas.height = Math.ceil(viewport.height);
-        const context = canvas.getContext("2d", { alpha: false });
-        await page.render({ canvasContext: context, viewport }).promise;
-        coverDataUrl = canvas.toDataURL("image/jpeg", 0.88);
-        canvas.width = 0;
-        canvas.height = 0;
+      if (coverDataUrl) {
+        coverFound = true;
       }
     }
 
+    const content = await page.getTextContent();
     pages.push(extractLines(content.items));
 
     progress(60 * (fileIndex + p / pdf.numPages) / files.length);
@@ -472,20 +595,19 @@ async function extractPDF(file, fileIndex) {
   };
 }
 
-
 function splitHeadings(text, fallbackTitle) {
   const source = String(text || "");
 
-  // 章节标记可能与上一段对话处于同一行；也支持外传、特别外传及“这是第120话”。
-  // “第58章开始。”这类章节分隔提示会整体消费，但标题仍只保留“第58章”，避免“开始。”成为正文残留。
   const chapterMark =
-    /(?:(特别外传|特别篇|外传|这是)\s*)?(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:个\s*)?(章节|章|节|卷|部|篇|回|话|幕|次)(?:开始)?(?:\s*[。．.!！?？])?(?=$|[\s\n。．.!！?？,，;；:：、」』”’"')）】])/g;
+    /(?:(特别外传|特别篇|外传|这是)\s*)?(?:第\s*)?([0-9０-９]+|[零〇一二两三四五六七八九十百千万廿卅]+)\s*(?:个\s*)?(章节|章|节|卷|部|篇|回|话|幕|次)(?:开始)?(?:\s*[。．.!！?？])?(?=$|[\s\n。．.!！?？，,;；:：、」』”’"')）】])/g;
 
   function toNumber(raw) {
     if (!raw) return null;
+
     raw = raw.replace(/[０-９]/g, c =>
       String.fromCharCode(c.charCodeAt(0) - 0xFEE0)
     );
+
     if (/^\d+$/.test(raw)) return Number(raw);
 
     const digits = {
@@ -501,20 +623,25 @@ function splitHeadings(text, fallbackTitle) {
     if (raw.startsWith("廿") || raw.startsWith("卅")) {
       const base = raw[0] === "廿" ? 20 : 30;
       const rest = raw.slice(1);
+
       if (!rest) return base;
+
       if ([...rest].every(c => c in digits)) {
         return base + Number([...rest].map(c => digits[c]).join(""));
       }
+
       return null;
     }
 
     const units = { 十: 10, 百: 100, 千: 1000, 万: 10000 };
     let total = 0, section = 0, number = 0;
+
     for (const c of raw) {
       if (c in digits) {
         number = digits[c];
       } else if (c in units) {
         const unit = units[c];
+
         if (unit === 10000) {
           section += number;
           total += (section || 1) * unit;
@@ -528,32 +655,35 @@ function splitHeadings(text, fallbackTitle) {
         return null;
       }
     }
+
     return total + section + number;
   }
 
   const tokens = [];
   chapterMark.lastIndex = 0;
+
   let match;
+
   while ((match = chapterMark.exec(source)) !== null) {
     const prefix = match[1] || "";
     const marker = match[0].trim().replace(/开始[。．.!！?？]*$/, "");
     const number = toNumber(match[2]);
     const unit = match[3];
+
     const before = source.slice(0, match.index);
     const currentLine = before.slice(before.lastIndexOf("\n") + 1).trimEnd();
+
     const atLineStart = currentLine.trim() === "";
     const afterSentence = /[。！？!?…」』”’"')）】]$/.test(currentLine.trimEnd());
     const hasExplicitPrefix = !!prefix || /第\s*/.test(marker);
 
-    // 章节通常独立成行；少数 PDF 把标题接在对话句末。
-    // 不要求编号必须连续，避免缺一话后导致后续所有章节都无法识别。
     if (!hasExplicitPrefix && !atLineStart && !afterSentence) continue;
     if (!atLineStart && !afterSentence && !prefix) continue;
 
     tokens.push({
       start: match.index,
       end: match.index + match[0].length,
-      marker: marker,
+      marker,
       title: (prefix ? prefix : "") + marker.replace(/^(?:特别外传|特别篇|外传|这是)\s*/, ""),
       number,
       unit,
@@ -567,12 +697,19 @@ function splitHeadings(text, fallbackTitle) {
   const accepted = [];
   let previousNumber = null;
   let previousWasExtra = false;
+
   for (const token of tokens) {
     const isExtra = /^(特别外传|特别篇|外传)/.test(token.title);
-    // 正篇编号只要求递增，不要求严格连续；外传/特别篇允许从 1 重新编号。
-    if (previousNumber !== null && !isExtra && !previousWasExtra && token.number <= previousNumber) {
+
+    if (
+      previousNumber !== null &&
+      !isExtra &&
+      !previousWasExtra &&
+      token.number <= previousNumber
+    ) {
       continue;
     }
+
     accepted.push(token);
     previousNumber = token.number;
     previousWasExtra = isExtra;
@@ -600,13 +737,12 @@ function splitHeadings(text, fallbackTitle) {
     title = token.title;
     cursor = token.end;
   }
+
   buffer += source.slice(cursor);
   flush();
 
   return chapters;
 }
-
-
 
 function makeChapters(documents) {
   const keepFiles = $("keepFiles").checked;
@@ -623,17 +759,16 @@ function makeChapters(documents) {
             if (i === 0 && part.title === doc.name) {
               part.title = doc.name + " — 正文";
             }
-
             chapters.push(part);
           });
         } else {
-  const only = parts[0];
+          const only = parts[0];
 
-  chapters.push({
-    title: only && only.title ? only.title : doc.name,
-    text: only && only.text ? only.text : doc.text
-  });
-}
+          chapters.push({
+            title: only && only.title ? only.title : doc.name,
+            text: only && only.text ? only.text : doc.text
+          });
+        }
       } else {
         chapters.push({ title: doc.name, text: doc.text });
       }
@@ -650,201 +785,42 @@ function makeChapters(documents) {
 }
 
 function paragraphs(text) {
-  const source = String(text || "")
+  const source = removeAsposeWatermark(String(text || "")
     .replace(/\u00a0/g, " ")
-    .replace(/\r\n?/g, "\n");
-
-  if ($("lineBreaks").checked) {
-    return source
-      .split(/\n+/)
-      .map(line => line.trim())
-      .filter(Boolean)
-      .map(line => "<p>" + escapeHTML(line) + "</p>")
-      .join("\n");
-  }
+    .replace(/\r\n?/g, "\n"));
 
   const rawBlocks = source
     .split(/\n[ \t]*\n+/)
     .map(block => block.trim())
     .filter(Boolean);
 
-  const quotePairs = {
-    "“": "”",
-    "「": "」",
-    "『": "』",
-    "‘": "’"
-  };
-
-  const openQuotes = new Set(Object.keys(quotePairs));
-  const closeQuotes = new Set(["”", "」", "』", "’"]);
-  const endPunctuation = new Set(["。", "！", "？", "!", "?"]);
-
   function normalize(s) {
-    s = s.replace(/[ \t]+/g, " ").trim();
-
-    if ($("clean").checked) {
-      s = s.replace(
-        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+(?=[\u3400-\u9fff\uf900-\ufaff])/g,
-        "$1"
-      );
-
-      s = s.replace(/([，。！？；：、])[ \t]+/g, "$1");
-
-      s = s.replace(
-        /([\u3400-\u9fff\uf900-\ufaff])[ \t]+([，。！？；：、）》】」』〕〉％…])/g,
-        "$1$2"
-      );
-
-      s = s.replace(/([（【「『〔〈])[ \t]+/g, "$1");
-      s = s.replace(/[ \t]+([）】」』〕〉])/g, "$1");
-    }
-
-    return s.trim();
-  }
-
-  function splitParagraph(input) {
-    const s = normalize(input);
-
-    if (!s) return [];
-    if (isStarLine(s) || isSoundLine(s)) return [s];
-
-    const result = [];
-    const stack = [];
-    let buffer = "";
-
-    function flush() {
-      const value = normalize(buffer);
-      if (value) result.push(value);
-      buffer = "";
-    }
-
-    function isOpen(ch) {
-      return openQuotes.has(ch);
-    }
-
-    function skipSpaces(index) {
-      while (index < s.length && /\s/.test(s[index])) index++;
-      return index;
-    }
-
-    function isSentenceEndBefore() {
-      return /[。！？!?][）】〉》]*$/.test(buffer.trim());
-    }
-
-    for (let i = 0; i < s.length; i++) {
-      const ch = s[i];
-
-      if (ch === '"') {
-        if (stack[stack.length - 1] === '"') {
-          stack.pop();
-          buffer += ch;
-
-          if (stack.length === 0) {
-            const next = skipSpaces(i + 1);
-
-            if (
-              next < s.length &&
-              (isOpen(s[next]) || s[next] === '"')
-            ) {
-              flush();
-              i = next - 1;
-            }
-          }
-        } else if (stack.length > 0 && isSentenceEndBefore()) {
-          stack.pop();
-          buffer += ch;
-
-          if (stack.length === 0) {
-            const next = skipSpaces(i + 1);
-
-            if (
-              next < s.length &&
-              (isOpen(s[next]) || s[next] === '"')
-            ) {
-              flush();
-              i = next - 1;
-            }
-          }
-        } else {
-          if (stack.length === 0 && normalize(buffer)) flush();
-
-          stack.push('"');
-          buffer += ch;
-        }
-
-        continue;
-      }
-
-      if (isOpen(ch)) {
-        if (stack.length === 0 && normalize(buffer)) flush();
-
-        stack.push(quotePairs[ch]);
-        buffer += ch;
-        continue;
-      }
-
-      if (closeQuotes.has(ch)) {
-        if (
-          stack[stack.length - 1] === ch ||
-          stack[stack.length - 1] === '"'
-        ) {
-          stack.pop();
-        } else {
-          const matching = stack.lastIndexOf(ch);
-          if (matching >= 0) stack.length = matching;
-        }
-
-        buffer += ch;
-
-        if (stack.length === 0) {
-          const next = skipSpaces(i + 1);
-
-          if (
-            next < s.length &&
-            (isOpen(s[next]) || s[next] === '"')
-          ) {
-            flush();
-            i = next - 1;
-          }
-        }
-
-        continue;
-      }
-
-      buffer += ch;
-
-      if (stack.length === 0 && endPunctuation.has(ch)) {
-        flush();
-        continue;
-      }
-
-      if (
-        stack.length > 0 &&
-        buffer.length > 900 &&
-        endPunctuation.has(ch) &&
-        /[。！？!?]/.test(
-          s.slice(i + 1, Math.min(s.length, i + 90))
-        )
-      ) {
-        flush();
-        stack.length = 0;
-      }
-    }
-
-    flush();
-    return result;
+    return normalizeText(s.replace(/[ \t]+/g, " "));
   }
 
   const output = [];
 
   for (const block of rawBlocks) {
-    output.push(...splitParagraph(block));
+    if ($("lineBreaks").checked) {
+      const lines = block.split("\n").map(normalize).filter(Boolean);
+
+      for (const line of lines) {
+        output.push("<p>" + escapeHTML(line) + "</p>");
+      }
+
+      continue;
+    }
+
+    const result = normalize(block);
+
+    if (!result) continue;
+
+    // 不按句号、问号、感叹号强制拆段。
+    // 保留 PDF 原始段落识别结果。
+    output.push("<p>" + escapeHTML(result) + "</p>");
   }
 
-  return output
-    .filter(Boolean)
-    .map(p => "<p>" + escapeHTML(p) + "</p>")
-    .join("\n");
+  return output.join("\n");
 }
 
 function xhtml(title, body) {
@@ -872,6 +848,7 @@ $("start").addEventListener("click", async () => {
   $("start").disabled = true;
   $("files").disabled = true;
   progress(0);
+  coverFound = false;
 
   try {
     const documents = [];
@@ -912,14 +889,24 @@ $("start").addEventListener("click", async () => {
     let manifest = "";
     let spine = "";
     let toc = "<ol>";
-    const coverDataUrl = documents[0] && documents[0].coverDataUrl;
+
+    // 从所有 PDF 中取得第一个成功提取的图片。
+    const coverDataUrl =
+      documents.find(d => d.coverDataUrl)?.coverDataUrl || null;
+
     if (coverDataUrl) {
-      const coverBase64 = coverDataUrl.split(",")[1];
-      const coverBinary = atob(coverBase64);
-      const coverBytes = new Uint8Array(coverBinary.length);
-      for (let i = 0; i < coverBinary.length; i++) coverBytes[i] = coverBinary.charCodeAt(i);
-      zip.file("OEBPS/cover.jpg", coverBytes, { binary: true });
-      manifest += '<item id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>';
+      const base64 = coverDataUrl.split(",")[1];
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      zip.file("OEBPS/cover.jpg", bytes, { binary: true });
+
+      manifest +=
+        '<item id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>';
     }
 
     chapters.forEach((chapter, i) => {
@@ -1009,8 +996,10 @@ ${manifest}
       "转换完成！\n\n" +
       report.join("\n") +
       `\n\n生成章节：${chapters.length}` +
+      `\n封面图片：${coverDataUrl ? "已提取" : "未找到可提取的图片"}` +
       `\nEPUB 大小：${(blob.size / 1048576).toFixed(2)} MB`
     );
+
   } catch (error) {
     console.error(error);
     status("转换失败");
